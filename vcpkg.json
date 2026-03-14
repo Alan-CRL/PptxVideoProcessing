@@ -1,0 +1,19 @@
+{
+  "name": "pptx-video-processing",
+  "version-string": "0.0.0",
+  "builtin-baseline": "b2f068faf45a3f04145bec0f52a66526ad590227",
+  "dependencies": [
+    "nlohmann-json",
+    "libzip"
+  ],
+  "overrides": [
+    {
+      "name": "nlohmann-json",
+      "version": "3.12.0#2"
+    },
+    {
+      "name": "libzip",
+      "version": "1.11.4"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/解决方案项/">
+    <File Path="Directory.Build.props" />
+    <File Path="Directory.Build.targets" />
+    <File Path="vcpkg.json" />
+  </Folder>
+  <Project Path="PptxVideoProcessing/PptxVideoProcessing.vcxproj" Id="419ea009-65ed-4936-9947-1650c7dc398e" />
+</Solution>

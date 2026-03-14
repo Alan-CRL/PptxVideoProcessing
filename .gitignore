@@ -1,0 +1,29 @@
+# Visual Studio
+/.vs/
+
+# Vcpkg
+/VcpkgInstalled/
+/PptxVideoProcessing/Vcpkg/
+
+# Build output
+/Build/
+
+# Project-local cache
+/PptxVideoProcessing/Cache/
+
+# Common VS / MSVC temporary files
+*.user
+*.VC.db
+*.VC.opendb
+*.suo
+
+# Optional: if some generated files escape your Cache dir
+*.ipch
+*.obj
+*.iobj
+*.ipdb
+*.pch
+*.ilk
+*.pdb
+*.tlog
+*.lastbuildstate
