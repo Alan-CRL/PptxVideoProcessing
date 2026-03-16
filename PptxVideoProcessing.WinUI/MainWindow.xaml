@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="PptxVideoProcessing.WinUI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:PptxVideoProcessing.WinUI"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    Title="PPT 视频处理"
+    mc:Ignorable="d">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="RootGrid" RowDefinitions="Auto,Auto,*,Auto,Auto">
+        <InfoBar
+            x:Name="StatusInfoBar"
+            Margin="24,20,24,0"
+            IsOpen="False"
+            IsClosable="True"
+            Severity="Informational" />
+
+        <StackPanel
+            Grid.Row="1"
+            Margin="24,16,24,0"
+            Spacing="6">
+            <TextBlock
+                Style="{ThemeResource TitleLargeTextBlockStyle}"
+                Text="PPTX 视频处理" />
+            <TextBlock
+                Opacity="0.74"
+                Text="选择一个或多个 PPTX 文件后，按顺序处理其中的内嵌视频，并在原文件旁生成新的输出文件。" />
+        </StackPanel>
+
+        <Border
+            Grid.Row="2"
+            Margin="24,20,24,0"
+            Padding="20"
+            Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="16">
+            <ScrollViewer
+                HorizontalScrollBarVisibility="Disabled"
+                VerticalScrollBarVisibility="Auto"
+                VerticalScrollMode="Enabled">
+                <Grid RowDefinitions="Auto,Auto,*">
+                    <StackPanel HorizontalAlignment="Stretch" Spacing="8">
+                        <TextBlock
+                            x:Name="CurrentStatusText"
+                            FontWeight="SemiBold"
+                            Text="当前状态：空闲" />
+                        <TextBlock
+                            x:Name="CurrentPptxText"
+                            Opacity="0.78"
+                            Text="当前 PPTX：尚未开始" />
+                        <TextBlock
+                            x:Name="CurrentAccelerationText"
+                            Opacity="0.78"
+                            Text="当前加速：系统原生 (Media Foundation)" />
+                        <ProgressBar
+                            x:Name="CurrentFileProgressBar"
+                            Minimum="0"
+                            Maximum="100"
+                            Value="0" />
+                        <TextBlock
+                            x:Name="CurrentDetailText"
+                            Opacity="0.78"
+                            Text="当前视频(准备中)" />
+                    </StackPanel>
+
+                    <StackPanel
+                        Grid.Row="1"
+                        Margin="0,18,0,0"
+                        Spacing="8">
+                        <TextBlock
+                            FontWeight="SemiBold"
+                            Text="批次总进度" />
+                        <ProgressBar
+                            x:Name="BatchProgressBar"
+                            Minimum="0"
+                            Maximum="100"
+                            Value="0" />
+                        <TextBlock
+                            x:Name="BatchProgressText"
+                            Opacity="0.78"
+                            Text="0 / 0 已完成" />
+                    </StackPanel>
+
+                    <ListView
+                        x:Name="QueueListView"
+                        Grid.Row="2"
+                        Margin="0,22,0,0"
+                        AllowDrop="True"
+                        DragOver="QueueListView_DragOver"
+                        Drop="QueueListView_Drop"
+                        ItemsSource="{x:Bind QueueItems, Mode=OneWay}"
+                        MinHeight="320"
+                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                        ScrollViewer.VerticalScrollBarVisibility="Auto"
+                        ScrollViewer.VerticalScrollMode="Enabled"
+                        SelectionMode="None">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+
+                        <ListView.Header>
+                            <Grid
+                                ColumnDefinitions="3*,110,160,132"
+                                Padding="0,0,0,10">
+                                <TextBlock
+                                    FontWeight="SemiBold"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Text="文件"
+                                    TextAlignment="Center" />
+                                <TextBlock
+                                    Grid.Column="1"
+                                    FontWeight="SemiBold"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Text="状态"
+                                    TextAlignment="Center" />
+                                <TextBlock
+                                    Grid.Column="2"
+                                    FontWeight="SemiBold"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Text="进度"
+                                    TextAlignment="Center" />
+                                <TextBlock
+                                    Grid.Column="3"
+                                    FontWeight="SemiBold"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    Text="操作"
+                                    TextAlignment="Center" />
+                            </Grid>
+                        </ListView.Header>
+
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="local:ProcessingJob">
+                                <Grid
+                                    HorizontalAlignment="Stretch"
+                                    RowDefinitions="Auto,Auto">
+                                    <Grid
+                                        ColumnDefinitions="3*,110,160,132"
+                                        HorizontalAlignment="Stretch"
+                                        Padding="0,10">
+
+                                        <StackPanel
+                                            Grid.Column="0"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Center"
+                                            Spacing="4">
+                                            <TextBlock
+                                                FontWeight="SemiBold"
+                                                HorizontalAlignment="Stretch"
+                                                Text="{x:Bind FileName}"
+                                                TextAlignment="Left"
+                                                TextTrimming="CharacterEllipsis" />
+                                            <TextBlock
+                                                HorizontalAlignment="Stretch"
+                                                Opacity="0.74"
+                                                Style="{ThemeResource CaptionTextBlockStyle}"
+                                                Text="{x:Bind InputPath}"
+                                                TextAlignment="Left"
+                                                TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+
+                                        <TextBlock
+                                            Grid.Column="1"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            Text="{x:Bind Status, Mode=OneWay}"
+                                            TextAlignment="Center" />
+
+                                        <TextBlock
+                                            Grid.Column="2"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            Text="{x:Bind Detail, Mode=OneWay}"
+                                            TextAlignment="Center"
+                                            TextWrapping="WrapWholeWords" />
+
+                                        <StackPanel
+                                            Grid.Column="3"
+                                            HorizontalAlignment="Center"
+                                            VerticalAlignment="Center"
+                                            Spacing="8">
+                                            <Button
+                                                Click="RemoveJobButton_Click"
+                                                Content="{x:Bind PrimaryActionText, Mode=OneWay}"
+                                                MinWidth="84"
+                                                Tag="{x:Bind}" />
+                                            <Button
+                                                Click="ToggleDetailsButton_Click"
+                                                Content="{x:Bind DetailsActionText, Mode=OneWay}"
+                                                MinWidth="84"
+                                                Tag="{x:Bind}"
+                                                Visibility="{x:Bind DetailsButtonVisibility, Mode=OneWay}" />
+                                        </StackPanel>
+                                    </Grid>
+
+                                    <Border
+                                        Grid.Row="1"
+                                        Margin="0,0,0,8"
+                                        Padding="14,12"
+                                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                        CornerRadius="12"
+                                        Visibility="{x:Bind ExpandedDetailsVisibility, Mode=OneWay}">
+                                        <TextBlock
+                                            HorizontalAlignment="Stretch"
+                                            Style="{ThemeResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind DetailSummary, Mode=OneWay}"
+                                            TextAlignment="Left"
+                                            TextWrapping="WrapWholeWords" />
+                                    </Border>
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+
+        <CommandBar
+            Grid.Row="3"
+            Margin="24,16,24,0"
+            DefaultLabelPosition="Right">
+            <AppBarButton
+                x:Name="SelectButton"
+                Click="SelectPptxButton_Click"
+                Icon="OpenFile"
+                Label="选择 PPTX" />
+            <AppBarButton
+                x:Name="OptionsButton"
+                Click="ConfigureOptionsButton_Click"
+                Icon="Setting"
+                Label="处理选项" />
+            <AppBarButton
+                x:Name="StartButton"
+                Click="StartProcessingButton_Click"
+                Icon="Play"
+                Label="开始处理" />
+            <AppBarButton
+                x:Name="ClearFinishedButton"
+                Click="ClearFinishedButton_Click"
+                Icon="Delete"
+                Label="清理结果" />
+            <AppBarButton
+                x:Name="ClearAllButton"
+                Click="ClearAllButton_Click"
+                Icon="Clear"
+                Label="清空队列" />
+            <AppBarButton
+                x:Name="ExitButton"
+                Click="ExitButton_Click"
+                Icon="Cancel"
+                Label="退出软件" />
+        </CommandBar>
+        <StackPanel
+            Grid.Row="4"
+            Margin="24,12,24,20"
+            Spacing="4">
+            <TextBlock
+                Opacity="0.72"
+                Text="版权所有 (c) 2026 AlanCRL(陈润林) 工作室" />
+            <TextBlock
+                Opacity="0.72"
+                Text="本项目基于 GNU 通用公共许可证第 3 版获得许可" />
+        </StackPanel>
+    </Grid>
+</Window>

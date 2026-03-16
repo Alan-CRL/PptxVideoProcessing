@@ -48,10 +48,12 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <OutDir>$(SolutionDir)Build\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>Cache\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>PptxVideoProcessing.Worker</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <OutDir>$(SolutionDir)Build\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>Cache\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>PptxVideoProcessing.Worker</TargetName>
   </PropertyGroup>
   <PropertyGroup Label="Vcpkg" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <VcpkgUseStatic>true</VcpkgUseStatic>
@@ -120,6 +122,18 @@
     <ClCompile Include="Ui.cppm" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="PrepareWorkerRuntimeAssets" AfterTargets="Build">
+    <WriteLinesToFile
+      File="$(OutDir)config.json"
+      Lines="{}"
+      Overwrite="false"
+      Condition="!Exists('$(OutDir)config.json')" />
+    <Copy
+      SourceFiles="$(SolutionDir)ffmpeg.exe"
+      DestinationFolder="$(OutDir)"
+      SkipUnchangedFiles="true"
+      Condition="Exists('$(SolutionDir)ffmpeg.exe')" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

@@ -34,6 +34,9 @@ export namespace pptxvp
         std::size_t processed_count{};
         std::size_t skipped_count{};
         std::size_t failed_count{};
+        std::size_t already_satisfied_count{};
+        std::size_t no_video_count{};
+        std::wstring acceleration_backend;
 
         [[nodiscard]] bool AnyChanges() const noexcept
         {
@@ -41,8 +44,24 @@ export namespace pptxvp
         }
     };
 
+    struct MediaProgressInfo
+    {
+        std::filesystem::path media_path;
+        std::size_t current_index{};
+        std::size_t total_count{};
+        std::optional<double> current_seconds;
+        std::optional<double> total_seconds;
+        std::optional<double> file_percent;
+        std::wstring note;
+        std::wstring speed;
+        std::wstring acceleration_backend;
+    };
+
+    using MediaProgressCallback = std::function<void(const MediaProgressInfo&)>;
+
     [[nodiscard]] MediaProcessSummary ProcessMedia(
         const std::filesystem::path& extracted_root,
         const std::filesystem::path& ffmpeg_path,
-        const AppConfig& config);
+        const AppConfig& config,
+        const MediaProgressCallback& progress_callback = {});
 }

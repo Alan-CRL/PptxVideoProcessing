@@ -15,7 +15,9 @@ PptxVideoProcessing 使用说明
 
 三、config.json 示例
 {
-  "encoder": "h265",
+  "encoder": "h264",
+  "hardwareAcceleration": "auto",
+  "preset": "p4",
   "frameRate": 30,
   "resolution": "720p"
 }
@@ -25,14 +27,14 @@ PptxVideoProcessing 使用说明
    - 可选。
    - 用于指定视频编码器。
    - 支持别名：
-     h264  -> libx264
-     h265  -> libx265
-     av1   -> libsvtav1
-     mpeg4 -> mpeg4
+	 h264  -> libx264
+	 h265  -> libx265
+	 av1   -> libsvtav1
+	 mpeg4 -> mpeg4
    - 也支持直接填写 ffmpeg.exe 支持的编码器名称，例如：
-     libx264、libx265、libsvtav1、mpeg4、
-     h264_nvenc、hevc_nvenc、av1_nvenc、
-     h264_qsv、hevc_qsv、av1_qsv 等。
+	 libx264、libx265、libsvtav1、mpeg4、
+	 h264_nvenc、hevc_nvenc、av1_nvenc、
+	 h264_qsv、hevc_qsv、av1_qsv 等。
    - 如果该项缺省，而 frameRate 或 resolution 有值，程序会尽量探测原视频编码并保持原编码风格。
 
 2. frameRate
@@ -41,7 +43,21 @@ PptxVideoProcessing 使用说明
    - 常见值：24、25、30、50、60。
    - 缺省表示不修改帧率。
 
-3. resolution
+3. hardwareAcceleration
+   - 可选。
+   - 用于优先选择 Windows 常见硬件编码器。
+   - 当前支持：auto、none、nvidia、intel、amd、windows。
+   - 缺省该项时，程序会优先尝试系统原生 Media Foundation 编码；若不可用，则回退为纯软件编码。
+   - 若写 auto，程序会按当前机器和 ffmpeg 可用编码器自动选择 NVIDIA / Intel / AMD / 系统原生加速；若都不可用，则回退为纯软件编码。
+   - 例如 encoder 为 h264 且 hardwareAcceleration 为 nvidia 时，会优先使用 h264_nvenc；若写 windows，则会优先尝试 h264_mf。
+   - 如果你已经直接填写了 h264_nvenc、hevc_qsv 这类具体编码器名，则以 encoder 为准。
+
+4. preset
+   - 可选。
+   - 透传给 ffmpeg 的 -preset，用于在速度与画质之间取舍。
+   - 例如软件编码常见值可用 veryfast、fast、medium；NVENC 常见值可用 p1 到 p7。
+
+5. resolution
    - 可选。
    - 当前支持：360p、480p、720p、1080p、2160p。
    - 程序会按目标高度缩放，并保持原视频宽高比。
@@ -55,38 +71,293 @@ PptxVideoProcessing 使用说明
 5. 若原视频容器与目标编码不兼容，程序会转成 MP4，并自动更新 PPTX 内的媒体引用。
 6. 程序默认保留首个视频流和可选音频流，音频通常按复制方式保留，不主动改变演示稿中的媒体位置与时长设置。
 */
+#include <nlohmann/json.hpp>
+
 import std.compat;
 
 import PptxVideoProcessing.App;
 import PptxVideoProcessing.Helper.Console;
+import PptxVideoProcessing.Helper.FileSystem;
 import PptxVideoProcessing.Helper.Utf;
 
-int wmain()
+namespace
 {
-    pptxvp::helper::InitializeUtf16Console();
-    pptxvp::helper::WriteLine(L"版权所有 (c) 2026 AlanCRL(陈润林) 工作室");
-    pptxvp::helper::WriteLine(L"本项目基于 GNU 通用公共许可证第 3 版获得许可");
-    pptxvp::helper::WriteLine(L"------------------------------------------------");
-    pptxvp::helper::WriteLine(L"");
+	using json = nlohmann::json;
 
-    int exit_code = 0;
+	struct WorkerOptions
+	{
+		std::optional<std::filesystem::path> input_path;
+		bool json_progress{};
+		bool no_pause{};
+		bool show_help{};
+	};
 
-    try
-    {
-        exit_code = pptxvp::Run();
-    }
-    catch (const std::exception& exception)
-    {
-        pptxvp::helper::WriteErrorLine(L"错误： " + pptxvp::helper::Utf8ToWide(exception.what()));
-        exit_code = 1;
-    }
-    catch (...)
-    {
-        pptxvp::helper::WriteErrorLine(L"错误：发生了未预期的异常。");
-        exit_code = 1;
-    }
+	[[nodiscard]] std::runtime_error MakeArgumentError(std::wstring_view message)
+	{
+		return std::runtime_error(pptxvp::helper::WideToUtf8(message));
+	}
 
-    pptxvp::helper::WriteLine(L"");
-    pptxvp::helper::WaitForAnyKey();
-    return exit_code;
+	[[nodiscard]] std::string PathToUtf8(const std::filesystem::path& path)
+	{
+		return pptxvp::helper::WideToUtf8(path.wstring());
+	}
+
+	[[nodiscard]] std::string StageToCode(pptxvp::ProcessStage stage)
+	{
+		switch (stage)
+		{
+		case pptxvp::ProcessStage::LoadingConfig:
+			return "loading_config";
+		case pptxvp::ProcessStage::ValidatingInput:
+			return "validating_input";
+		case pptxvp::ProcessStage::CopyingOriginal:
+			return "copying_original";
+		case pptxvp::ProcessStage::ExtractingArchive:
+			return "extracting_archive";
+		case pptxvp::ProcessStage::ProcessingMedia:
+			return "processing_media";
+		case pptxvp::ProcessStage::UpdatingReferences:
+			return "updating_references";
+		case pptxvp::ProcessStage::CreatingArchive:
+			return "creating_archive";
+		case pptxvp::ProcessStage::Completed:
+			return "completed";
+		}
+
+		return "unknown";
+	}
+
+	void WriteJsonLine(const json& value)
+	{
+		std::cout << value.dump() << '\n';
+		std::cout.flush();
+	}
+
+	void PrintBanner()
+	{
+		pptxvp::helper::WriteLine(L"版权所有 (c) 2026 AlanCRL(陈润林) 工作室");
+		pptxvp::helper::WriteLine(L"本项目基于 GNU 通用公共许可证第 3 版获得许可");
+		pptxvp::helper::WriteLine(L"------------------------------------------------");
+		pptxvp::helper::WriteLine(L"");
+	}
+
+	void PrintUsage()
+	{
+		pptxvp::helper::WriteLine(L"用法：");
+		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe");
+		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe --input <pptx路径> [--no-pause]");
+		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe --input <pptx路径> --json-progress --no-pause");
+		pptxvp::helper::WriteLine(L"");
+		pptxvp::helper::WriteLine(L"参数说明：");
+		pptxvp::helper::WriteLine(L"  --input <路径>        处理指定的 PPTX 文件");
+		pptxvp::helper::WriteLine(L"  --json-progress       以 JSON Lines 输出进度事件");
+		pptxvp::helper::WriteLine(L"  --no-pause            结束时不等待按键");
+		pptxvp::helper::WriteLine(L"  --help                显示帮助");
+	}
+
+	[[nodiscard]] WorkerOptions ParseOptions(int argc, wchar_t* argv[])
+	{
+		WorkerOptions options;
+
+		for (int index = 1; index < argc; ++index)
+		{
+			const std::wstring_view argument = argv[index];
+
+			if (argument == L"--input")
+			{
+				if (index + 1 >= argc)
+				{
+					throw MakeArgumentError(L"--input 需要提供一个 PPTX 文件路径。");
+				}
+
+				options.input_path = std::filesystem::path(argv[++index]);
+				continue;
+			}
+
+			if (argument == L"--json-progress")
+			{
+				options.json_progress = true;
+				options.no_pause = true;
+				continue;
+			}
+
+			if (argument == L"--no-pause")
+			{
+				options.no_pause = true;
+				continue;
+			}
+
+			if (argument == L"--help" || argument == L"-h" || argument == L"/?")
+			{
+				options.show_help = true;
+				continue;
+			}
+
+			throw MakeArgumentError(L"不支持的参数： " + std::wstring(argument));
+		}
+
+		if (options.json_progress && !options.input_path.has_value())
+		{
+			throw MakeArgumentError(L"--json-progress 模式必须同时提供 --input。");
+		}
+
+		return options;
+	}
+
+	json SerializeProgressEvent(const pptxvp::ProgressEvent& event)
+	{
+		json payload = {
+			{"type", "progress"},
+			{"stage", StageToCode(event.stage)},
+			{"message", pptxvp::helper::WideToUtf8(event.message)},
+			{"currentIndex", event.current_index},
+			{"totalCount", event.total_count},
+			{"speed", pptxvp::helper::WideToUtf8(event.speed)},
+		};
+
+		if (!event.acceleration_backend.empty())
+		{
+			payload["accelerationBackend"] = pptxvp::helper::WideToUtf8(event.acceleration_backend);
+		}
+
+		if (!event.current_file.empty())
+		{
+			payload["currentFile"] = PathToUtf8(event.current_file);
+		}
+
+		if (event.file_percent.has_value())
+		{
+			payload["filePercent"] = *event.file_percent;
+		}
+
+		return payload;
+	}
+
+	json SerializeCompletedEvent(const pptxvp::ProcessResult& result)
+	{
+		json payload = {
+			{"type", "completed"},
+			{"inputPath", PathToUtf8(result.input_path)},
+			{"outputPath", PathToUtf8(result.output_path)},
+			{"copiedOriginal", result.copied_original},
+			{"processedCount", result.summary.processed_count},
+			{"skippedCount", result.summary.skipped_count},
+			{"failedCount", result.summary.failed_count},
+			{"alreadySatisfiedCount", result.summary.already_satisfied_count},
+			{"noVideoCount", result.summary.no_video_count},
+		};
+
+		if (!result.acceleration_backend.empty())
+		{
+			payload["accelerationBackend"] = pptxvp::helper::WideToUtf8(result.acceleration_backend);
+		}
+
+		return payload;
+	}
+
+	void WriteJsonError(std::string_view message)
+	{
+		WriteJsonLine(json{
+			{"type", "error"},
+			{"message", std::string(message)},
+			});
+	}
 }
+
+int wmain(int argc, wchar_t* argv[])
+{
+	WorkerOptions options;
+
+	try
+	{
+		options = ParseOptions(argc, argv);
+	}
+	catch (const std::exception& exception)
+	{
+		pptxvp::helper::InitializeUtf16Console();
+		pptxvp::helper::WriteErrorLine(L"错误： " + pptxvp::helper::Utf8ToWide(exception.what()));
+		return 1;
+	}
+
+	const bool interactive_console = !options.json_progress;
+
+	if (interactive_console)
+	{
+		pptxvp::helper::InitializeUtf16Console();
+		PrintBanner();
+	}
+
+	if (options.show_help)
+	{
+		PrintUsage();
+		return 0;
+	}
+
+	int exit_code = 0;
+
+	try
+	{
+		if (!options.input_path.has_value())
+		{
+			exit_code = pptxvp::Run();
+		}
+		else
+		{
+			const std::filesystem::path executable_directory = pptxvp::helper::GetExecutableDirectory();
+			const pptxvp::ProcessRequest request{
+				.input_path = *options.input_path,
+				.ffmpeg_path = executable_directory / L"ffmpeg.exe",
+				.config_path = executable_directory / L"config.json",
+			};
+
+			const pptxvp::ProcessResult result = pptxvp::ProcessPptx(
+				request,
+				options.json_progress
+				? pptxvp::ProgressCallback([](const pptxvp::ProgressEvent& event)
+					{
+						WriteJsonLine(SerializeProgressEvent(event));
+					})
+				: pptxvp::ProgressCallback{});
+
+			if (options.json_progress)
+			{
+				WriteJsonLine(SerializeCompletedEvent(result));
+			}
+		}
+	}
+	catch (const std::exception& exception)
+	{
+		if (options.json_progress)
+		{
+			WriteJsonError(exception.what());
+		}
+		else
+		{
+			pptxvp::helper::WriteErrorLine(L"错误： " + pptxvp::helper::Utf8ToWide(exception.what()));
+		}
+
+		exit_code = 1;
+	}
+	catch (...)
+	{
+		if (options.json_progress)
+		{
+			WriteJsonError("发生了未预期的异常。");
+		}
+		else
+		{
+			pptxvp::helper::WriteErrorLine(L"错误：发生了未预期的异常。");
+		}
+
+		exit_code = 1;
+	}
+
+	if (interactive_console && !options.no_pause)
+	{
+		pptxvp::helper::WriteLine(L"");
+		pptxvp::helper::WaitForAnyKey();
+	}
+
+	return exit_code;
+}
+

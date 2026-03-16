@@ -7,5 +7,9 @@
     <File Path="Directory.Build.targets" />
     <File Path="vcpkg.json" />
   </Folder>
+  <Project Path="PptxVideoProcessing.WinUI/PptxVideoProcessing.WinUI.csproj" Id="5f97b0e1-0bfa-4f20-8475-f6335fe86688">
+    <BuildDependency Project="PptxVideoProcessing/PptxVideoProcessing.vcxproj" />
+    <Platform Project="x64" />
+  </Project>
   <Project Path="PptxVideoProcessing/PptxVideoProcessing.vcxproj" Id="419ea009-65ed-4936-9947-1650c7dc398e" />
 </Solution>

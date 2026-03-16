@@ -1,0 +1,76 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>PptxVideoProcessing.WinUI</RootNamespace>
+    <AssemblyName>PptxVideoProcessing</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WinUISDKReferences>false</WinUISDKReferences>
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling Condition="'$(EnableMsixTooling)' == ''">true</EnableMsixTooling>
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+    <SingleFileBuildOnBuild Condition="'$(SingleFileBuildOnBuild)' == '' and '$(Configuration)' == 'Release'">true</SingleFileBuildOnBuild>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <OutputPath>..\Build\$(Platform)\$(Configuration)\</OutputPath>
+    <IntermediateOutputPath>obj\$(Platform)\$(Configuration)\</IntermediateOutputPath>
+    <WorkerOutputDir>..\Build\x64\$(Configuration)\</WorkerOutputDir>
+    <LocalDotnetCliHome>$(MSBuildProjectDirectory)\..\.dotnet-cli-home</LocalDotnetCliHome>
+    <RuntimeAssetsDir>$(OutputPath)App\</RuntimeAssetsDir>
+    <LauncherCompilerPath>C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe</LauncherCompilerPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+    <Compile Remove="Launcher.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260101001" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
+  </ItemGroup>
+
+  <Target Name="BuildWorkerProject" BeforeTargets="Build" Condition="'$(BuildingSolutionFile)' != 'true' and '$(MSBuildRuntimeType)' != 'Core'">
+    <MSBuild Projects="..\PptxVideoProcessing\PptxVideoProcessing.vcxproj"
+             Targets="Build"
+             Properties="Configuration=$(Configuration);Platform=x64;SolutionDir=$(MSBuildProjectDirectory)\\..\\" />
+  </Target>
+
+  <Target Name="PublishSingleFileToBuildOutput"
+          AfterTargets="Build"
+          Condition="'$(SingleFileBuildOnBuild)' == 'true' and '$(SingleFileBuild)' != 'true' and '$(MSBuildRuntimeType)' != 'Core'">
+    <MakeDir Directories="$(LocalDotnetCliHome);$(RuntimeAssetsDir)" />
+    <Exec Command="dotnet publish &quot;$(MSBuildProjectFullPath)&quot; -c $(Configuration) -r win-x64 -p:Platform=$(Platform) -p:BuildingSolutionFile=true -p:SingleFileBuild=true -p:PublishSingleFile=true -p:SelfContained=true -p:WindowsAppSDKSelfContained=true -p:EnableMsixTooling=true -p:DebugType=None -p:DebugSymbols=false -o &quot;$(RuntimeAssetsDir)&quot;"
+          EnvironmentVariables="DOTNET_CLI_HOME=$(LocalDotnetCliHome)" />
+  </Target>
+
+  <Target Name="CopyWorkerRuntimeAssetsToPublish" AfterTargets="Publish">
+    <ItemGroup>
+      <PublishWorkerAsset Include="$(WorkerOutputDir)PptxVideoProcessing.Worker.exe" Condition="Exists('$(WorkerOutputDir)PptxVideoProcessing.Worker.exe')" />
+      <PublishWorkerAsset Include="$(WorkerOutputDir)config.json" Condition="Exists('$(WorkerOutputDir)config.json')" />
+      <PublishWorkerAsset Include="$(WorkerOutputDir)ffmpeg.exe" Condition="Exists('$(WorkerOutputDir)ffmpeg.exe')" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(PublishWorkerAsset)"
+          DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(PublishWorkerAsset)' != ''" />
+  </Target>
+
+  <Target Name="BuildReleaseLauncher" AfterTargets="Publish" DependsOnTargets="CopyWorkerRuntimeAssetsToPublish" Condition="'$(SingleFileBuild)' == 'true' and Exists('$(LauncherCompilerPath)')">
+    <Exec Command="&quot;$(LauncherCompilerPath)&quot; /nologo /target:winexe /optimize+ /out:&quot;$(OutputPath)PptxVideoProcessing.exe&quot; &quot;$(MSBuildProjectDirectory)\Launcher.cs&quot;" />
+  </Target>
+
+  <Target Name="CleanReleaseRootAfterLauncherBuild" AfterTargets="BuildReleaseLauncher" Condition="'$(SingleFileBuild)' == 'true' and Exists('$(LauncherCompilerPath)')">
+    <Exec Command="pwsh -NoProfile -Command &quot;$out = [IO.Path]::GetFullPath('$(OutputPath)'); Get-ChildItem $out -Force | Where-Object { $_.Name -notin @('App', 'PptxVideoProcessing.exe') } | Remove-Item -Recurse -Force&quot;" />
+  </Target>
+</Project>
+

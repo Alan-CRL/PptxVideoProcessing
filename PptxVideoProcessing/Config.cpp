@@ -102,6 +102,60 @@ namespace
         throw MakeConfigError(
             L"config.json 中的 resolution 只能是 360p、480p、720p、1080p 或 2160p。");
     }
+
+    [[nodiscard]] pptxvp::HardwareAcceleration ParseHardwareAcceleration(std::wstring_view value)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(value);
+
+        if (lowered.empty())
+        {
+            throw MakeConfigError(L"config.json 中的 hardwareAcceleration 不能为空字符串。");
+        }
+
+        if (lowered == L"auto")
+        {
+            return pptxvp::HardwareAcceleration::Auto;
+        }
+
+        if (lowered == L"none")
+        {
+            return pptxvp::HardwareAcceleration::None;
+        }
+
+        if (lowered == L"nvidia" || lowered == L"nvenc")
+        {
+            return pptxvp::HardwareAcceleration::Nvidia;
+        }
+
+        if (lowered == L"intel" || lowered == L"qsv" || lowered == L"intelqsv")
+        {
+            return pptxvp::HardwareAcceleration::IntelQsv;
+        }
+
+        if (lowered == L"amd" || lowered == L"amf")
+        {
+            return pptxvp::HardwareAcceleration::AmdAmf;
+        }
+
+        if (lowered == L"windows" || lowered == L"mf" || lowered == L"mediafoundation")
+        {
+            return pptxvp::HardwareAcceleration::MediaFoundation;
+        }
+
+        throw MakeConfigError(L"config.json 中的 hardwareAcceleration 只能是 auto、none、nvidia、intel、amd 或 windows。");
+    }
+
+    [[nodiscard]] std::wstring NormalizePreset(std::wstring_view preset)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(preset);
+
+        if (lowered.empty())
+        {
+            throw MakeConfigError(L"config.json 中的 preset 不能为空字符串。");
+        }
+
+        return lowered;
+    }
 }
 
 namespace pptxvp
@@ -171,6 +225,29 @@ namespace pptxvp
             config.resolution_height = ParseResolution(helper::Utf8ToWide(document["resolution"].get<std::string>()));
         }
 
+        if (document.contains("hardwareAcceleration"))
+        {
+            if (!document["hardwareAcceleration"].is_string())
+            {
+                throw MakeConfigError(L"config.json 中的 hardwareAcceleration 必须是字符串。");
+            }
+
+            config.hardware_acceleration =
+                ParseHardwareAcceleration(helper::Utf8ToWide(document["hardwareAcceleration"].get<std::string>()));
+        }
+
+        if (document.contains("preset"))
+        {
+            if (!document["preset"].is_string())
+            {
+                throw MakeConfigError(L"config.json 中的 preset 必须是字符串。");
+            }
+
+            config.preset = NormalizePreset(helper::Utf8ToWide(document["preset"].get<std::string>()));
+        }
+
         return config;
     }
 }
+
+

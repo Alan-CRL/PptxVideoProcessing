@@ -1,5 +1,9 @@
 module;
 
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <Windows.h>
+
 module PptxVideoProcessing.Media;
 
 import std.compat;
@@ -26,6 +30,9 @@ namespace
         bool has_video{};
         std::wstring codec_name;
         std::optional<double> duration_seconds;
+        std::optional<double> frame_rate;
+        std::optional<int> width;
+        std::optional<int> height;
     };
 
     struct TranscodeAttempt
@@ -173,6 +180,57 @@ namespace
         }
 
         return line;
+    }
+
+    [[nodiscard]] std::optional<double> CalculateFilePercent(
+        const std::optional<double>& current_seconds,
+        const std::optional<double>& total_seconds)
+    {
+        if (!current_seconds.has_value() || !total_seconds.has_value() || *total_seconds <= 0.0)
+        {
+            return std::nullopt;
+        }
+
+        return std::clamp(*current_seconds / *total_seconds, 0.0, 1.0) * 100.0;
+    }
+
+    void ReportMediaProgress(
+        const pptxvp::MediaProgressCallback& progress_callback,
+        std::size_t current_index,
+        std::size_t total_count,
+        const std::filesystem::path& media_path,
+        std::wstring_view note,
+        const std::optional<double>& current_seconds,
+        const std::optional<double>& total_seconds,
+        std::wstring_view speed,
+        std::wstring_view acceleration_backend,
+        std::chrono::steady_clock::duration elapsed)
+    {
+        if (progress_callback)
+        {
+            progress_callback(pptxvp::MediaProgressInfo{
+                .media_path = media_path,
+                .current_index = current_index,
+                .total_count = total_count,
+                .current_seconds = current_seconds,
+                .total_seconds = total_seconds,
+                .file_percent = CalculateFilePercent(current_seconds, total_seconds),
+                .note = std::wstring(note),
+                .speed = std::wstring(speed),
+                .acceleration_backend = std::wstring(acceleration_backend),
+            });
+            return;
+        }
+
+        pptxvp::helper::WriteProgressLine(BuildProgressLine(
+            current_index,
+            total_count,
+            media_path.filename().wstring(),
+            note,
+            current_seconds,
+            total_seconds,
+            speed,
+            elapsed));
     }
 
     [[nodiscard]] bool IsFfmpegProgressLine(std::string_view line)
@@ -343,6 +401,449 @@ namespace
         }
     }
 
+    enum class ResolvedAccelerationBackend
+    {
+        Software,
+        Nvidia,
+        IntelQsv,
+        AmdAmf,
+        MediaFoundation,
+    };
+
+    struct AdapterPresence
+    {
+        bool has_nvidia{};
+        bool has_intel{};
+        bool has_amd{};
+    };
+
+    [[nodiscard]] bool IsCanonicalSoftwareEncoder(std::wstring_view encoder)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(encoder);
+        return lowered == L"libx264" || lowered == L"libx265" || lowered == L"libsvtav1" || lowered == L"mpeg4";
+    }
+
+    [[nodiscard]] ResolvedAccelerationBackend AccelerationBackendFromEncoder(std::wstring_view encoder)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(encoder);
+
+        if (lowered.contains(L"_nvenc"))
+        {
+            return ResolvedAccelerationBackend::Nvidia;
+        }
+
+        if (lowered.contains(L"_qsv"))
+        {
+            return ResolvedAccelerationBackend::IntelQsv;
+        }
+
+        if (lowered.contains(L"_amf"))
+        {
+            return ResolvedAccelerationBackend::AmdAmf;
+        }
+
+        if (lowered.contains(L"_mf"))
+        {
+            return ResolvedAccelerationBackend::MediaFoundation;
+        }
+
+        return ResolvedAccelerationBackend::Software;
+    }
+
+    [[nodiscard]] std::wstring DescribeAccelerationBackend(ResolvedAccelerationBackend backend)
+    {
+        switch (backend)
+        {
+        case ResolvedAccelerationBackend::Nvidia:
+            return L"NVIDIA NVENC";
+        case ResolvedAccelerationBackend::IntelQsv:
+            return L"Intel QSV";
+        case ResolvedAccelerationBackend::AmdAmf:
+            return L"AMD AMF";
+        case ResolvedAccelerationBackend::MediaFoundation:
+            return L"系统原生 (Media Foundation)";
+        default:
+            return L"纯软件";
+        }
+    }
+
+    [[nodiscard]] std::unordered_set<std::wstring> QueryAvailableEncoders(const std::filesystem::path& ffmpeg_path)
+    {
+        std::unordered_set<std::wstring> encoders;
+        const pptxvp::helper::ProcessResult result =
+            pptxvp::helper::RunProcess(ffmpeg_path, {L"-hide_banner", L"-encoders"});
+
+        std::istringstream stream{result.output};
+        std::string line;
+
+        while (std::getline(stream, line))
+        {
+            std::istringstream line_stream(line);
+            std::string flags;
+            std::string encoder_name;
+
+            if (!(line_stream >> flags >> encoder_name))
+            {
+                continue;
+            }
+
+            if (flags.size() >= 6)
+            {
+                encoders.insert(pptxvp::helper::ToLowerAscii(pptxvp::helper::Utf8ToWide(encoder_name)));
+            }
+        }
+
+        return encoders;
+    }
+
+    [[nodiscard]] bool SupportsEncoder(
+        const std::unordered_set<std::wstring>& encoders,
+        std::wstring_view encoder_name)
+    {
+        return encoders.contains(pptxvp::helper::ToLowerAscii(encoder_name));
+    }
+
+    [[nodiscard]] bool CanLoadRuntimeDependency(std::wstring_view library_name)
+    {
+        const HMODULE module = ::LoadLibraryW(std::wstring(library_name).c_str());
+
+        if (module == nullptr)
+        {
+            return false;
+        }
+
+        ::FreeLibrary(module);
+        return true;
+    }
+
+    [[nodiscard]] bool BackendRuntimeAvailable(ResolvedAccelerationBackend backend)
+    {
+        switch (backend)
+        {
+        case ResolvedAccelerationBackend::Nvidia:
+            return CanLoadRuntimeDependency(L"nvcuda.dll");
+        default:
+            return true;
+        }
+    }
+
+    [[nodiscard]] bool BackendAvailable(
+        ResolvedAccelerationBackend backend,
+        const std::unordered_set<std::wstring>& encoders,
+        const AdapterPresence& adapters)
+    {
+        if (!BackendRuntimeAvailable(backend))
+        {
+            return false;
+        }
+
+        switch (backend)
+        {
+        case ResolvedAccelerationBackend::Nvidia:
+            return adapters.has_nvidia &&
+                   (SupportsEncoder(encoders, L"h264_nvenc") || SupportsEncoder(encoders, L"hevc_nvenc") ||
+                    SupportsEncoder(encoders, L"av1_nvenc"));
+        case ResolvedAccelerationBackend::IntelQsv:
+            return adapters.has_intel &&
+                   (SupportsEncoder(encoders, L"h264_qsv") || SupportsEncoder(encoders, L"hevc_qsv") ||
+                    SupportsEncoder(encoders, L"av1_qsv"));
+        case ResolvedAccelerationBackend::AmdAmf:
+            return adapters.has_amd &&
+                   (SupportsEncoder(encoders, L"h264_amf") || SupportsEncoder(encoders, L"hevc_amf") ||
+                    SupportsEncoder(encoders, L"av1_amf"));
+        case ResolvedAccelerationBackend::MediaFoundation:
+            return SupportsEncoder(encoders, L"h264_mf") || SupportsEncoder(encoders, L"hevc_mf") ||
+                   SupportsEncoder(encoders, L"av1_mf");
+        default:
+            return true;
+        }
+    }
+
+    [[nodiscard]] AdapterPresence DetectAdapterPresence()
+    {
+        AdapterPresence presence;
+
+        for (DWORD index = 0; ; ++index)
+        {
+            DISPLAY_DEVICEW device{};
+            device.cb = sizeof(device);
+
+            if (!EnumDisplayDevicesW(nullptr, index, &device, 0))
+            {
+                break;
+            }
+
+            if ((device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
+            {
+                continue;
+            }
+
+            std::wstring description = pptxvp::helper::ToLowerAscii(device.DeviceString);
+            description.push_back(L' ');
+            description.append(pptxvp::helper::ToLowerAscii(device.DeviceID));
+
+            if (description.contains(L"nvidia"))
+            {
+                presence.has_nvidia = true;
+            }
+
+            if (description.contains(L"intel"))
+            {
+                presence.has_intel = true;
+            }
+
+            if (description.contains(L"amd") || description.contains(L"radeon") ||
+                description.contains(L"advanced micro devices"))
+            {
+                presence.has_amd = true;
+            }
+        }
+
+        return presence;
+    }
+
+    [[nodiscard]] ResolvedAccelerationBackend ResolveFallbackAccelerationBackend(
+        const std::unordered_set<std::wstring>& encoders,
+        const AdapterPresence& adapters)
+    {
+        return BackendAvailable(ResolvedAccelerationBackend::MediaFoundation, encoders, adapters)
+            ? ResolvedAccelerationBackend::MediaFoundation
+            : ResolvedAccelerationBackend::Software;
+    }
+
+    [[nodiscard]] ResolvedAccelerationBackend ResolvePreferredAccelerationBackend(
+        const pptxvp::AppConfig& config,
+        const std::unordered_set<std::wstring>& encoders,
+        const AdapterPresence& adapters)
+    {
+        if (config.encoder.has_value())
+        {
+            const ResolvedAccelerationBackend explicit_backend = AccelerationBackendFromEncoder(*config.encoder);
+
+            if (explicit_backend != ResolvedAccelerationBackend::Software)
+            {
+                return BackendAvailable(explicit_backend, encoders, adapters)
+                    ? explicit_backend
+                    : ResolveFallbackAccelerationBackend(encoders, adapters);
+            }
+        }
+
+        if (!config.hardware_acceleration.has_value())
+        {
+            return ResolveFallbackAccelerationBackend(encoders, adapters);
+        }
+
+        switch (*config.hardware_acceleration)
+        {
+        case pptxvp::HardwareAcceleration::Auto:
+            if (BackendAvailable(ResolvedAccelerationBackend::Nvidia, encoders, adapters))
+            {
+                return ResolvedAccelerationBackend::Nvidia;
+            }
+
+            if (BackendAvailable(ResolvedAccelerationBackend::IntelQsv, encoders, adapters))
+            {
+                return ResolvedAccelerationBackend::IntelQsv;
+            }
+
+            if (BackendAvailable(ResolvedAccelerationBackend::AmdAmf, encoders, adapters))
+            {
+                return ResolvedAccelerationBackend::AmdAmf;
+            }
+
+            return ResolveFallbackAccelerationBackend(encoders, adapters);
+        case pptxvp::HardwareAcceleration::None:
+            return ResolvedAccelerationBackend::Software;
+        case pptxvp::HardwareAcceleration::Nvidia:
+            return BackendAvailable(ResolvedAccelerationBackend::Nvidia, encoders, adapters)
+                ? ResolvedAccelerationBackend::Nvidia
+                : ResolveFallbackAccelerationBackend(encoders, adapters);
+        case pptxvp::HardwareAcceleration::IntelQsv:
+            return BackendAvailable(ResolvedAccelerationBackend::IntelQsv, encoders, adapters)
+                ? ResolvedAccelerationBackend::IntelQsv
+                : ResolveFallbackAccelerationBackend(encoders, adapters);
+        case pptxvp::HardwareAcceleration::AmdAmf:
+            return BackendAvailable(ResolvedAccelerationBackend::AmdAmf, encoders, adapters)
+                ? ResolvedAccelerationBackend::AmdAmf
+                : ResolveFallbackAccelerationBackend(encoders, adapters);
+        case pptxvp::HardwareAcceleration::MediaFoundation:
+            return BackendAvailable(ResolvedAccelerationBackend::MediaFoundation, encoders, adapters)
+                ? ResolvedAccelerationBackend::MediaFoundation
+                : ResolvedAccelerationBackend::Software;
+        default:
+            return ResolvedAccelerationBackend::Software;
+        }
+    }
+    [[nodiscard]] std::wstring ResolveHardwareAcceleratedEncoder(
+        std::wstring_view encoder,
+        ResolvedAccelerationBackend backend)
+    {
+        if (!IsCanonicalSoftwareEncoder(encoder))
+        {
+            return std::wstring(encoder);
+        }
+
+        const CodecFamily family = CodecFamilyFromEncoder(encoder);
+
+        switch (backend)
+        {
+        case ResolvedAccelerationBackend::Nvidia:
+            switch (family)
+            {
+            case CodecFamily::H264:
+                return L"h264_nvenc";
+            case CodecFamily::H265:
+                return L"hevc_nvenc";
+            case CodecFamily::Av1:
+                return L"av1_nvenc";
+            default:
+                return std::wstring(encoder);
+            }
+        case ResolvedAccelerationBackend::IntelQsv:
+            switch (family)
+            {
+            case CodecFamily::H264:
+                return L"h264_qsv";
+            case CodecFamily::H265:
+                return L"hevc_qsv";
+            case CodecFamily::Av1:
+                return L"av1_qsv";
+            default:
+                return std::wstring(encoder);
+            }
+        case ResolvedAccelerationBackend::AmdAmf:
+            switch (family)
+            {
+            case CodecFamily::H264:
+                return L"h264_amf";
+            case CodecFamily::H265:
+                return L"hevc_amf";
+            case CodecFamily::Av1:
+                return L"av1_amf";
+            default:
+                return std::wstring(encoder);
+            }
+        case ResolvedAccelerationBackend::MediaFoundation:
+            switch (family)
+            {
+            case CodecFamily::H264:
+                return L"h264_mf";
+            case CodecFamily::H265:
+                return L"hevc_mf";
+            case CodecFamily::Av1:
+                return L"av1_mf";
+            default:
+                return std::wstring(encoder);
+            }
+        default:
+            return std::wstring(encoder);
+        }
+    }
+
+    void TryAddEncoderCandidate(
+        std::vector<std::wstring>& candidates,
+        const std::unordered_set<std::wstring>& available_encoders,
+        std::wstring_view encoder)
+    {
+        if (encoder.empty())
+        {
+            return;
+        }
+
+        const std::wstring normalized = pptxvp::helper::ToLowerAscii(encoder);
+
+        if (!SupportsEncoder(available_encoders, normalized))
+        {
+            return;
+        }
+
+        if (std::ranges::find(candidates, normalized) == candidates.end())
+        {
+            candidates.push_back(normalized);
+        }
+    }
+
+    [[nodiscard]] std::vector<std::wstring> BuildEncoderCandidates(
+        std::wstring_view base_encoder,
+        ResolvedAccelerationBackend preferred_backend,
+        const std::unordered_set<std::wstring>& available_encoders)
+    {
+        std::vector<std::wstring> candidates;
+        std::wstring normalized_base_encoder(base_encoder);
+        const ResolvedAccelerationBackend explicit_encoder_backend = AccelerationBackendFromEncoder(base_encoder);
+
+        if (explicit_encoder_backend != ResolvedAccelerationBackend::Software &&
+            explicit_encoder_backend != preferred_backend)
+        {
+            const std::optional<std::wstring> fallback_software_encoder =
+                EncoderForCodecFamily(CodecFamilyFromEncoder(base_encoder));
+
+            if (fallback_software_encoder.has_value())
+            {
+                normalized_base_encoder = *fallback_software_encoder;
+            }
+        }
+
+        const std::wstring preferred_encoder = ResolveHardwareAcceleratedEncoder(normalized_base_encoder, preferred_backend);
+        TryAddEncoderCandidate(candidates, available_encoders, preferred_encoder);
+
+        const CodecFamily family =
+            CodecFamilyFromEncoder(preferred_encoder.empty() ? normalized_base_encoder : preferred_encoder);
+        const std::optional<std::wstring> software_encoder = EncoderForCodecFamily(family);
+
+        if (software_encoder.has_value())
+        {
+            if (preferred_backend == ResolvedAccelerationBackend::Software)
+            {
+                TryAddEncoderCandidate(candidates, available_encoders, *software_encoder);
+                TryAddEncoderCandidate(
+                    candidates,
+                    available_encoders,
+                    ResolveHardwareAcceleratedEncoder(*software_encoder, ResolvedAccelerationBackend::MediaFoundation));
+            }
+            else
+            {
+                if (preferred_backend != ResolvedAccelerationBackend::MediaFoundation)
+                {
+                    TryAddEncoderCandidate(
+                        candidates,
+                        available_encoders,
+                        ResolveHardwareAcceleratedEncoder(*software_encoder, ResolvedAccelerationBackend::MediaFoundation));
+                }
+
+                TryAddEncoderCandidate(candidates, available_encoders, *software_encoder);
+            }
+        }
+
+        if (candidates.empty())
+        {
+            candidates.push_back(preferred_encoder.empty() ? normalized_base_encoder : preferred_encoder);
+        }
+
+        return candidates;
+    }
+    [[nodiscard]] std::wstring JoinFailureDetails(const std::vector<std::wstring>& details)
+    {
+        if (details.empty())
+        {
+            return L"ffmpeg 执行失败。";
+        }
+
+        std::wstring joined;
+
+        for (std::size_t index = 0; index < details.size(); ++index)
+        {
+            if (index != 0)
+            {
+                joined.append(L"；");
+            }
+
+            joined.append(details[index]);
+        }
+
+        return joined;
+    }
+
     [[nodiscard]] bool ContainerSupportsCodec(const std::filesystem::path& path, CodecFamily family)
     {
         const std::wstring extension = LowerExtension(path);
@@ -406,12 +907,28 @@ namespace
 
         static const std::regex video_regex(R"(Video:\s*([A-Za-z0-9_]+))");
         static const std::regex duration_regex(R"(Duration:\s*([0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?))");
+        static const std::regex dimension_regex(R"((\d{2,5})x(\d{2,5}))");
+        static const std::regex fps_regex(R"(([0-9]+(?:\.[0-9]+)?)\s*fps)");
         std::smatch match;
         std::optional<double> duration_seconds;
+        std::optional<double> frame_rate;
+        std::optional<int> width;
+        std::optional<int> height;
 
         if (std::regex_search(result.output, match, duration_regex))
         {
             duration_seconds = ParseTimestampSeconds(match[1].str());
+        }
+
+        if (std::regex_search(result.output, match, dimension_regex))
+        {
+            width = std::stoi(match[1].str());
+            height = std::stoi(match[2].str());
+        }
+
+        if (std::regex_search(result.output, match, fps_regex))
+        {
+            frame_rate = std::stod(match[1].str());
         }
 
         if (std::regex_search(result.output, match, video_regex))
@@ -420,10 +937,50 @@ namespace
                 .has_video = true,
                 .codec_name = pptxvp::helper::Utf8ToWide(match[1].str()),
                 .duration_seconds = duration_seconds,
+                .frame_rate = frame_rate,
+                .width = width,
+                .height = height,
             };
         }
 
         return ProbeInfo{};
+    }
+
+    [[nodiscard]] bool MatchesTargetConditions(const pptxvp::AppConfig& config, const ProbeInfo& probe)
+    {
+        if (!probe.has_video)
+        {
+            return false;
+        }
+
+        if (config.encoder.has_value())
+        {
+            const CodecFamily current_family = CodecFamilyFromDecoder(probe.codec_name);
+            const CodecFamily target_family = CodecFamilyFromEncoder(*config.encoder);
+
+            if (target_family != CodecFamily::Unknown && current_family != target_family)
+            {
+                return false;
+            }
+        }
+
+        if (config.frame_rate.has_value())
+        {
+            if (!probe.frame_rate.has_value() || std::abs(*probe.frame_rate - static_cast<double>(*config.frame_rate)) > 0.05)
+            {
+                return false;
+            }
+        }
+
+        if (config.resolution_height.has_value())
+        {
+            if (!probe.height.has_value() || *probe.height != *config.resolution_height)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     [[nodiscard]] std::optional<std::wstring> ResolveEffectiveEncoder(const pptxvp::AppConfig& config, const ProbeInfo& probe)
@@ -531,6 +1088,12 @@ namespace
             std::wstring(encoder),
         };
 
+        if (config.preset.has_value())
+        {
+            arguments.push_back(L"-preset");
+            arguments.push_back(*config.preset);
+        }
+
         const std::wstring filter_chain = BuildFilterChain(config);
 
         if (!filter_chain.empty())
@@ -612,12 +1175,18 @@ namespace pptxvp
     MediaProcessSummary ProcessMedia(
         const std::filesystem::path& extracted_root,
         const std::filesystem::path& ffmpeg_path,
-        const AppConfig& config)
+        const AppConfig& config,
+        const MediaProgressCallback& progress_callback)
     {
         MediaProcessSummary summary;
         const std::filesystem::path media_directory = extracted_root / "ppt" / "media";
         const std::vector<std::filesystem::path> candidates = FindCandidateMediaFiles(media_directory);
         const auto processing_started_at = std::chrono::steady_clock::now();
+        const std::unordered_set<std::wstring> available_encoders = QueryAvailableEncoders(ffmpeg_path);
+        const AdapterPresence adapters = DetectAdapterPresence();
+        const ResolvedAccelerationBackend selected_backend =
+            ResolvePreferredAccelerationBackend(config, available_encoders, adapters);
+        summary.acceleration_backend = DescribeAccelerationBackend(selected_backend);
 
         for (std::size_t index = 0; index < candidates.size(); ++index)
         {
@@ -626,15 +1195,17 @@ namespace pptxvp
             action.source_path = media_path;
             action.output_path = media_path;
 
-            helper::WriteProgressLine(BuildProgressLine(
+            ReportMediaProgress(
+                progress_callback,
                 index + 1,
                 candidates.size(),
-                media_path.filename().wstring(),
+                media_path,
                 L"分析中",
                 std::nullopt,
                 std::nullopt,
                 L"",
-                std::chrono::steady_clock::now() - processing_started_at));
+                summary.acceleration_backend,
+                std::chrono::steady_clock::now() - processing_started_at);
 
             const ProbeInfo probe = ProbeMedia(ffmpeg_path, media_path);
 
@@ -642,16 +1213,40 @@ namespace pptxvp
             {
                 action.status = MediaActionStatus::Skipped;
                 action.message = L"ffmpeg 未检测到视频流，已跳过。";
-                helper::WriteProgressLine(BuildProgressLine(
+                ReportMediaProgress(
+                    progress_callback,
                     index + 1,
                     candidates.size(),
-                    media_path.filename().wstring(),
+                    media_path,
                     L"已跳过",
                     std::nullopt,
                     std::nullopt,
                     L"",
-                    std::chrono::steady_clock::now() - processing_started_at));
+                    summary.acceleration_backend,
+                    std::chrono::steady_clock::now() - processing_started_at);
                 ++summary.skipped_count;
+                ++summary.no_video_count;
+                summary.items.push_back(std::move(action));
+                continue;
+            }
+
+            if (MatchesTargetConditions(config, probe))
+            {
+                action.status = MediaActionStatus::Skipped;
+                action.message = L"视频已满足目标条件，保持原样。";
+                ReportMediaProgress(
+                    progress_callback,
+                    index + 1,
+                    candidates.size(),
+                    media_path,
+                    L"已满足目标条件",
+                    probe.duration_seconds,
+                    probe.duration_seconds,
+                    L"",
+                    summary.acceleration_backend,
+                    std::chrono::steady_clock::now() - processing_started_at);
+                ++summary.skipped_count;
+                ++summary.already_satisfied_count;
                 summary.items.push_back(std::move(action));
                 continue;
             }
@@ -664,104 +1259,146 @@ namespace pptxvp
                 action.message = config.HasVideoChanges()
                                      ? L"无法将原始视频编码映射到可用编码器，已跳过。"
                                      : L"当前未配置任何视频处理参数，因此保持原样。";
-                helper::WriteProgressLine(BuildProgressLine(
+                ReportMediaProgress(
+                    progress_callback,
                     index + 1,
                     candidates.size(),
-                    media_path.filename().wstring(),
+                    media_path,
                     L"已跳过",
                     std::nullopt,
                     probe.duration_seconds,
                     L"",
-                    std::chrono::steady_clock::now() - processing_started_at));
+                    summary.acceleration_backend,
+                    std::chrono::steady_clock::now() - processing_started_at);
                 ++summary.skipped_count;
                 summary.items.push_back(std::move(action));
                 continue;
             }
 
-            const CodecFamily encoder_family = CodecFamilyFromEncoder(*encoder);
-            std::filesystem::path preferred_output_path = media_path;
-            bool should_retry_with_mp4 = false;
+            const std::vector<std::wstring> encoder_candidates =
+                BuildEncoderCandidates(*encoder, selected_backend, available_encoders);
+            const std::wstring preferred_acceleration_label = DescribeAccelerationBackend(selected_backend);
+            TranscodeAttempt attempt;
+            std::wstring used_encoder;
+            std::wstring acceleration_label = preferred_acceleration_label;
+            std::wstring fallback_note;
+            std::vector<std::wstring> failure_details;
 
-            if (encoder_family != CodecFamily::Unknown)
+            for (std::size_t candidate_index = 0; candidate_index < encoder_candidates.size(); ++candidate_index)
             {
-                if (!ContainerSupportsCodec(media_path, encoder_family))
+                const std::wstring& candidate_encoder = encoder_candidates[candidate_index];
+                const std::wstring candidate_acceleration_label =
+                    DescribeAccelerationBackend(AccelerationBackendFromEncoder(candidate_encoder));
+                const CodecFamily encoder_family = CodecFamilyFromEncoder(candidate_encoder);
+                std::filesystem::path preferred_output_path = media_path;
+                bool should_retry_with_mp4 = false;
+
+                if (encoder_family != CodecFamily::Unknown)
                 {
-                    preferred_output_path = MakeConvertedTargetPath(media_path);
+                    if (!ContainerSupportsCodec(media_path, encoder_family))
+                    {
+                        preferred_output_path = MakeConvertedTargetPath(media_path);
+                    }
                 }
-            }
-            else
-            {
-                should_retry_with_mp4 = LowerExtension(media_path) != L".mp4";
-            }
-
-            helper::WriteProgressLine(BuildProgressLine(
-                index + 1,
-                candidates.size(),
-                media_path.filename().wstring(),
-                L"",
-                std::nullopt,
-                probe.duration_seconds,
-                L"",
-                std::chrono::steady_clock::now() - processing_started_at));
-
-            TranscodeAttempt attempt = TranscodeMediaFile(
-                ffmpeg_path,
-                media_path,
-                preferred_output_path,
-                *encoder,
-                config,
-                [&](const LiveProgressState& state)
+                else
                 {
-                    helper::WriteProgressLine(BuildProgressLine(
-                        index + 1,
-                        candidates.size(),
-                        media_path.filename().wstring(),
-                        L"",
-                        state.current_seconds,
-                        probe.duration_seconds,
-                        state.speed,
-                        std::chrono::steady_clock::now() - processing_started_at));
-                });
+                    should_retry_with_mp4 = LowerExtension(media_path) != L".mp4";
+                }
 
-            if (!attempt.succeeded && preferred_output_path == media_path && should_retry_with_mp4)
-            {
-                preferred_output_path = MakeConvertedTargetPath(media_path);
-                attempt = TranscodeMediaFile(
+                ReportMediaProgress(
+                    progress_callback,
+                    index + 1,
+                    candidates.size(),
+                    media_path,
+                    candidate_index == 0 ? L"" : L"首选加速不可用，正在自动回退...",
+                    std::nullopt,
+                    probe.duration_seconds,
+                    L"",
+                    candidate_acceleration_label,
+                    std::chrono::steady_clock::now() - processing_started_at);
+
+                TranscodeAttempt candidate_attempt = TranscodeMediaFile(
                     ffmpeg_path,
                     media_path,
                     preferred_output_path,
-                    *encoder,
+                    candidate_encoder,
                     config,
                     [&](const LiveProgressState& state)
                     {
-                        helper::WriteProgressLine(BuildProgressLine(
+                        ReportMediaProgress(
+                            progress_callback,
                             index + 1,
                             candidates.size(),
-                            media_path.filename().wstring(),
+                            media_path,
                             L"",
                             state.current_seconds,
                             probe.duration_seconds,
                             state.speed,
-                            std::chrono::steady_clock::now() - processing_started_at));
+                            candidate_acceleration_label,
+                            std::chrono::steady_clock::now() - processing_started_at);
                     });
+
+                if (!candidate_attempt.succeeded && preferred_output_path == media_path && should_retry_with_mp4)
+                {
+                    preferred_output_path = MakeConvertedTargetPath(media_path);
+                    candidate_attempt = TranscodeMediaFile(
+                        ffmpeg_path,
+                        media_path,
+                        preferred_output_path,
+                        candidate_encoder,
+                        config,
+                        [&](const LiveProgressState& state)
+                        {
+                            ReportMediaProgress(
+                                progress_callback,
+                                index + 1,
+                                candidates.size(),
+                                media_path,
+                                L"",
+                                state.current_seconds,
+                                probe.duration_seconds,
+                                state.speed,
+                                candidate_acceleration_label,
+                                std::chrono::steady_clock::now() - processing_started_at);
+                        });
+                }
+
+                if (candidate_attempt.succeeded)
+                {
+                    attempt = std::move(candidate_attempt);
+                    used_encoder = candidate_encoder;
+                    acceleration_label = candidate_acceleration_label;
+                    break;
+                }
+
+                failure_details.push_back(candidate_acceleration_label + L"：" + candidate_attempt.detail);
             }
 
-            if (!attempt.succeeded)
+            if (used_encoder.empty())
             {
                 action.status = MediaActionStatus::Failed;
-                action.message = attempt.detail;
-                helper::WriteProgressLine(BuildProgressLine(
+                action.message = JoinFailureDetails(failure_details);
+                ReportMediaProgress(
+                    progress_callback,
                     index + 1,
                     candidates.size(),
-                    media_path.filename().wstring(),
+                    media_path,
                     L"失败",
                     std::nullopt,
                     probe.duration_seconds,
                     L"",
-                    std::chrono::steady_clock::now() - processing_started_at));
+                    acceleration_label,
+                    std::chrono::steady_clock::now() - processing_started_at);
                 ++summary.failed_count;
                 summary.items.push_back(std::move(action));
                 continue;
+            }
+
+            summary.acceleration_backend = acceleration_label;
+
+            if (acceleration_label != preferred_acceleration_label)
+            {
+                fallback_note = L"首选加速不可用，已自动回退到 " + acceleration_label + L"。";
             }
 
             action.status = MediaActionStatus::Processed;
@@ -769,15 +1406,24 @@ namespace pptxvp
             action.message = attempt.final_path == media_path
                                  ? L"视频内容已在原位置更新。"
                                  : L"视频容器已改为 MP4，并同步更新了 PPTX 引用。";
-            helper::WriteProgressLine(BuildProgressLine(
+
+            if (!fallback_note.empty())
+            {
+                action.message.append(L" ");
+                action.message.append(fallback_note);
+            }
+
+            ReportMediaProgress(
+                progress_callback,
                 index + 1,
                 candidates.size(),
-                media_path.filename().wstring(),
+                media_path,
                 L"",
                 probe.duration_seconds,
                 probe.duration_seconds,
                 L"",
-                std::chrono::steady_clock::now() - processing_started_at));
+                acceleration_label,
+                std::chrono::steady_clock::now() - processing_started_at);
 
             if (attempt.final_path != media_path)
             {
@@ -791,7 +1437,32 @@ namespace pptxvp
             summary.items.push_back(std::move(action));
         }
 
-        helper::FinishProgressLine();
+        if (!progress_callback)
+        {
+            helper::FinishProgressLine();
+        }
+
         return summary;
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -3,13 +3,17 @@
 
 # Vcpkg
 /VcpkgInstalled/
+/Vcpkg/
 /PptxVideoProcessing/Vcpkg/
 
 # Build output
 /Build/
+/PptxVideoProcessing/Build/
 
 # Project-local cache
 /PptxVideoProcessing/Cache/
+/.dotnet-cli-home/
+/PptxVideoProcessing.WinUI/obj/
 
 # Common VS / MSVC temporary files
 *.user
