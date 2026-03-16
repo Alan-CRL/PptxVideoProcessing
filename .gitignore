@@ -1,9 +1,9 @@
 # Visual Studio
 /.vs/
+/PptxVideoProcessing/PptxVideoProcessing/
 
 # Vcpkg
 /VcpkgInstalled/
-/Vcpkg/
 /PptxVideoProcessing/Vcpkg/
 
 # Build output
