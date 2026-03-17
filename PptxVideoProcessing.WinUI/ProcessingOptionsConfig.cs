@@ -4,7 +4,7 @@ internal sealed class ProcessingOptionsConfig
 {
     public string Encoder { get; set; } = string.Empty;
 
-    public string HardwareAcceleration { get; set; } = string.Empty;
+    public string HardwareAcceleration { get; set; } = "auto";
 
     public string Preset { get; set; } = string.Empty;
 

@@ -8,7 +8,8 @@ PptxVideoProcessing 使用说明
 
 二、使用步骤
 1. 将本程序生成的 exe 与 ffmpeg.exe 放在同一目录。
-2. 可选：在 exe 同目录放置 config.json；如果不存在，程序首次启动时会自动创建一个空的 {}。
+   - ffmpeg 建议使用稳定发行版 7.0.x 或 7.1.x；不要使用 git/nightly build。
+2. 可选：在 exe 同目录放置 config.json；如果不存在，程序首次启动时会自动创建一个默认包含 {"hardwareAcceleration":"auto"} 的配置。
 3. 运行程序，按提示选择一个 .pptx 文件。
 4. 程序会自动处理内嵌视频，并在原文件所在目录生成“原文件名_已处理.pptx”。
 5. 如果输出文件已存在，程序会自动递增命名为“_已处理(2)”“_已处理(3)”等。
@@ -47,7 +48,7 @@ PptxVideoProcessing 使用说明
    - 可选。
    - 用于优先选择 Windows 常见硬件编码器。
    - 当前支持：auto、none、nvidia、intel、amd、windows。
-   - 缺省该项时，程序会优先尝试系统原生 Media Foundation 编码；若不可用，则回退为纯软件编码。
+   - 缺省该项时，程序会按 auto 处理：自动识别并优先尝试当前机器真正可用的 NVIDIA / Intel / AMD / 系统原生编码；若都不可用，则回退为纯软件编码。
    - 若写 auto，程序会按当前机器和 ffmpeg 可用编码器自动选择 NVIDIA / Intel / AMD / 系统原生加速；若都不可用，则回退为纯软件编码。
    - 例如 encoder 为 h264 且 hardwareAcceleration 为 nvidia 时，会优先使用 h264_nvenc；若写 windows，则会优先尝试 h264_mf。
    - 如果你已经直接填写了 h264_nvenc、hevc_qsv 这类具体编码器名，则以 encoder 为准。
@@ -70,6 +71,7 @@ PptxVideoProcessing 使用说明
 4. 程序会扫描 ppt/media 中的常见视频文件，例如 mp4、m4v、mov、avi、wmv、mkv、webm。
 5. 若原视频容器与目标编码不兼容，程序会转成 MP4，并自动更新 PPTX 内的媒体引用。
 6. 程序默认保留首个视频流和可选音频流，音频通常按复制方式保留，不主动改变演示稿中的媒体位置与时长设置。
+7. 为避免新 nightly build 抬高 NVENC / AMF / QSV 的驱动门槛，当前版本仅支持 FFmpeg 7.0.x / 7.1.x 稳定发行版（libavcodec 61.x）。
 */
 #include <nlohmann/json.hpp>
 

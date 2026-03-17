@@ -410,12 +410,7 @@ namespace
         MediaFoundation,
     };
 
-    struct AdapterPresence
-    {
-        bool has_nvidia{};
-        bool has_intel{};
-        bool has_amd{};
-    };
+    using EncoderOperationalCache = std::unordered_map<std::wstring, bool>;
 
     [[nodiscard]] bool IsCanonicalSoftwareEncoder(std::wstring_view encoder)
     {
@@ -503,118 +498,17 @@ namespace
         return encoders.contains(pptxvp::helper::ToLowerAscii(encoder_name));
     }
 
-    [[nodiscard]] bool CanLoadRuntimeDependency(std::wstring_view library_name)
+    void AppendBackendIfMissing(
+        std::vector<ResolvedAccelerationBackend>& order,
+        ResolvedAccelerationBackend backend)
     {
-        const HMODULE module = ::LoadLibraryW(std::wstring(library_name).c_str());
-
-        if (module == nullptr)
+        if (std::ranges::find(order, backend) == order.end())
         {
-            return false;
-        }
-
-        ::FreeLibrary(module);
-        return true;
-    }
-
-    [[nodiscard]] bool BackendRuntimeAvailable(ResolvedAccelerationBackend backend)
-    {
-        switch (backend)
-        {
-        case ResolvedAccelerationBackend::Nvidia:
-            return CanLoadRuntimeDependency(L"nvcuda.dll");
-        default:
-            return true;
+            order.push_back(backend);
         }
     }
 
-    [[nodiscard]] bool BackendAvailable(
-        ResolvedAccelerationBackend backend,
-        const std::unordered_set<std::wstring>& encoders,
-        const AdapterPresence& adapters)
-    {
-        if (!BackendRuntimeAvailable(backend))
-        {
-            return false;
-        }
-
-        switch (backend)
-        {
-        case ResolvedAccelerationBackend::Nvidia:
-            return adapters.has_nvidia &&
-                   (SupportsEncoder(encoders, L"h264_nvenc") || SupportsEncoder(encoders, L"hevc_nvenc") ||
-                    SupportsEncoder(encoders, L"av1_nvenc"));
-        case ResolvedAccelerationBackend::IntelQsv:
-            return adapters.has_intel &&
-                   (SupportsEncoder(encoders, L"h264_qsv") || SupportsEncoder(encoders, L"hevc_qsv") ||
-                    SupportsEncoder(encoders, L"av1_qsv"));
-        case ResolvedAccelerationBackend::AmdAmf:
-            return adapters.has_amd &&
-                   (SupportsEncoder(encoders, L"h264_amf") || SupportsEncoder(encoders, L"hevc_amf") ||
-                    SupportsEncoder(encoders, L"av1_amf"));
-        case ResolvedAccelerationBackend::MediaFoundation:
-            return SupportsEncoder(encoders, L"h264_mf") || SupportsEncoder(encoders, L"hevc_mf") ||
-                   SupportsEncoder(encoders, L"av1_mf");
-        default:
-            return true;
-        }
-    }
-
-    [[nodiscard]] AdapterPresence DetectAdapterPresence()
-    {
-        AdapterPresence presence;
-
-        for (DWORD index = 0; ; ++index)
-        {
-            DISPLAY_DEVICEW device{};
-            device.cb = sizeof(device);
-
-            if (!EnumDisplayDevicesW(nullptr, index, &device, 0))
-            {
-                break;
-            }
-
-            if ((device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) != 0)
-            {
-                continue;
-            }
-
-            std::wstring description = pptxvp::helper::ToLowerAscii(device.DeviceString);
-            description.push_back(L' ');
-            description.append(pptxvp::helper::ToLowerAscii(device.DeviceID));
-
-            if (description.contains(L"nvidia"))
-            {
-                presence.has_nvidia = true;
-            }
-
-            if (description.contains(L"intel"))
-            {
-                presence.has_intel = true;
-            }
-
-            if (description.contains(L"amd") || description.contains(L"radeon") ||
-                description.contains(L"advanced micro devices"))
-            {
-                presence.has_amd = true;
-            }
-        }
-
-        return presence;
-    }
-
-    [[nodiscard]] ResolvedAccelerationBackend ResolveFallbackAccelerationBackend(
-        const std::unordered_set<std::wstring>& encoders,
-        const AdapterPresence& adapters)
-    {
-        return BackendAvailable(ResolvedAccelerationBackend::MediaFoundation, encoders, adapters)
-            ? ResolvedAccelerationBackend::MediaFoundation
-            : ResolvedAccelerationBackend::Software;
-    }
-
-    [[nodiscard]] ResolvedAccelerationBackend ResolvePreferredAccelerationBackend(
-        const pptxvp::AppConfig& config,
-        const std::unordered_set<std::wstring>& encoders,
-        const AdapterPresence& adapters)
+    [[nodiscard]] std::wstring DescribeRequestedAcceleration(const pptxvp::AppConfig& config)
     {
         if (config.encoder.has_value())
         {
@@ -622,58 +516,87 @@ namespace
 
             if (explicit_backend != ResolvedAccelerationBackend::Software)
             {
-                return BackendAvailable(explicit_backend, encoders, adapters)
-                    ? explicit_backend
-                    : ResolveFallbackAccelerationBackend(encoders, adapters);
+                return DescribeAccelerationBackend(explicit_backend);
             }
         }
 
-        if (!config.hardware_acceleration.has_value())
+        if (!config.hardware_acceleration.has_value() ||
+            *config.hardware_acceleration == pptxvp::HardwareAcceleration::Auto)
         {
-            return ResolveFallbackAccelerationBackend(encoders, adapters);
+            return L"自动识别中";
         }
 
         switch (*config.hardware_acceleration)
         {
-        case pptxvp::HardwareAcceleration::Auto:
-            if (BackendAvailable(ResolvedAccelerationBackend::Nvidia, encoders, adapters))
-            {
-                return ResolvedAccelerationBackend::Nvidia;
-            }
-
-            if (BackendAvailable(ResolvedAccelerationBackend::IntelQsv, encoders, adapters))
-            {
-                return ResolvedAccelerationBackend::IntelQsv;
-            }
-
-            if (BackendAvailable(ResolvedAccelerationBackend::AmdAmf, encoders, adapters))
-            {
-                return ResolvedAccelerationBackend::AmdAmf;
-            }
-
-            return ResolveFallbackAccelerationBackend(encoders, adapters);
         case pptxvp::HardwareAcceleration::None:
-            return ResolvedAccelerationBackend::Software;
+            return DescribeAccelerationBackend(ResolvedAccelerationBackend::Software);
         case pptxvp::HardwareAcceleration::Nvidia:
-            return BackendAvailable(ResolvedAccelerationBackend::Nvidia, encoders, adapters)
-                ? ResolvedAccelerationBackend::Nvidia
-                : ResolveFallbackAccelerationBackend(encoders, adapters);
+            return DescribeAccelerationBackend(ResolvedAccelerationBackend::Nvidia);
         case pptxvp::HardwareAcceleration::IntelQsv:
-            return BackendAvailable(ResolvedAccelerationBackend::IntelQsv, encoders, adapters)
-                ? ResolvedAccelerationBackend::IntelQsv
-                : ResolveFallbackAccelerationBackend(encoders, adapters);
+            return DescribeAccelerationBackend(ResolvedAccelerationBackend::IntelQsv);
         case pptxvp::HardwareAcceleration::AmdAmf:
-            return BackendAvailable(ResolvedAccelerationBackend::AmdAmf, encoders, adapters)
-                ? ResolvedAccelerationBackend::AmdAmf
-                : ResolveFallbackAccelerationBackend(encoders, adapters);
+            return DescribeAccelerationBackend(ResolvedAccelerationBackend::AmdAmf);
         case pptxvp::HardwareAcceleration::MediaFoundation:
-            return BackendAvailable(ResolvedAccelerationBackend::MediaFoundation, encoders, adapters)
-                ? ResolvedAccelerationBackend::MediaFoundation
-                : ResolvedAccelerationBackend::Software;
+            return DescribeAccelerationBackend(ResolvedAccelerationBackend::MediaFoundation);
         default:
-            return ResolvedAccelerationBackend::Software;
+            return DescribeAccelerationBackend(ResolvedAccelerationBackend::Software);
         }
     }
+
+    [[nodiscard]] std::vector<ResolvedAccelerationBackend> BuildBackendOrder(
+        const pptxvp::AppConfig& config,
+        std::wstring_view base_encoder)
+    {
+        std::vector<ResolvedAccelerationBackend> order;
+        const ResolvedAccelerationBackend explicit_backend = AccelerationBackendFromEncoder(base_encoder);
+
+        if (explicit_backend != ResolvedAccelerationBackend::Software)
+        {
+            AppendBackendIfMissing(order, explicit_backend);
+        }
+
+        if (!config.hardware_acceleration.has_value() ||
+            *config.hardware_acceleration == pptxvp::HardwareAcceleration::Auto)
+        {
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::Nvidia);
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::IntelQsv);
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::AmdAmf);
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::MediaFoundation);
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::Software);
+            return order;
+        }
+
+        switch (*config.hardware_acceleration)
+        {
+        case pptxvp::HardwareAcceleration::None:
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::Software);
+            return order;
+        case pptxvp::HardwareAcceleration::Nvidia:
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::Nvidia);
+            break;
+        case pptxvp::HardwareAcceleration::IntelQsv:
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::IntelQsv);
+            break;
+        case pptxvp::HardwareAcceleration::AmdAmf:
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::AmdAmf);
+            break;
+        case pptxvp::HardwareAcceleration::MediaFoundation:
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::MediaFoundation);
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::Software);
+            return order;
+        default:
+            AppendBackendIfMissing(order, ResolvedAccelerationBackend::Software);
+            return order;
+        }
+
+        AppendBackendIfMissing(order, ResolvedAccelerationBackend::Nvidia);
+        AppendBackendIfMissing(order, ResolvedAccelerationBackend::IntelQsv);
+        AppendBackendIfMissing(order, ResolvedAccelerationBackend::AmdAmf);
+        AppendBackendIfMissing(order, ResolvedAccelerationBackend::MediaFoundation);
+        AppendBackendIfMissing(order, ResolvedAccelerationBackend::Software);
+        return order;
+    }
+
     [[nodiscard]] std::wstring ResolveHardwareAcceleratedEncoder(
         std::wstring_view encoder,
         ResolvedAccelerationBackend backend)
@@ -742,8 +665,10 @@ namespace
 
     void TryAddEncoderCandidate(
         std::vector<std::wstring>& candidates,
+        const std::filesystem::path& ffmpeg_path,
         const std::unordered_set<std::wstring>& available_encoders,
-        std::wstring_view encoder)
+        std::wstring_view encoder,
+        EncoderOperationalCache& encoder_operational_cache)
     {
         if (encoder.empty())
         {
@@ -757,6 +682,42 @@ namespace
             return;
         }
 
+        if (AccelerationBackendFromEncoder(normalized) != ResolvedAccelerationBackend::Software)
+        {
+            auto [it, inserted] = encoder_operational_cache.try_emplace(normalized, false);
+
+            if (inserted)
+            {
+                const pptxvp::helper::ProcessResult probe_result = pptxvp::helper::RunProcess(
+                    ffmpeg_path,
+                    {
+                        L"-hide_banner",
+                        L"-loglevel",
+                        L"error",
+                        L"-f",
+                        L"lavfi",
+                        L"-i",
+                        // NVENC rejects very small frames such as 128x72 on some GPUs/drivers.
+                        L"color=size=256x144:rate=1:color=black",
+                        L"-frames:v",
+                        L"1",
+                        L"-an",
+                        L"-c:v",
+                        normalized,
+                        L"-f",
+                        L"null",
+                        L"-",
+                    },
+                    ffmpeg_path.parent_path());
+                it->second = probe_result.exit_code == 0;
+            }
+
+            if (!it->second)
+            {
+                return;
+            }
+        }
+
         if (std::ranges::find(candidates, normalized) == candidates.end())
         {
             candidates.push_back(normalized);
@@ -764,60 +725,66 @@ namespace
     }
 
     [[nodiscard]] std::vector<std::wstring> BuildEncoderCandidates(
+        const std::filesystem::path& ffmpeg_path,
         std::wstring_view base_encoder,
-        ResolvedAccelerationBackend preferred_backend,
-        const std::unordered_set<std::wstring>& available_encoders)
+        const pptxvp::AppConfig& config,
+        const std::unordered_set<std::wstring>& available_encoders,
+        EncoderOperationalCache& encoder_operational_cache)
     {
         std::vector<std::wstring> candidates;
-        std::wstring normalized_base_encoder(base_encoder);
-        const ResolvedAccelerationBackend explicit_encoder_backend = AccelerationBackendFromEncoder(base_encoder);
-
-        if (explicit_encoder_backend != ResolvedAccelerationBackend::Software &&
-            explicit_encoder_backend != preferred_backend)
-        {
-            const std::optional<std::wstring> fallback_software_encoder =
-                EncoderForCodecFamily(CodecFamilyFromEncoder(base_encoder));
-
-            if (fallback_software_encoder.has_value())
-            {
-                normalized_base_encoder = *fallback_software_encoder;
-            }
-        }
-
-        const std::wstring preferred_encoder = ResolveHardwareAcceleratedEncoder(normalized_base_encoder, preferred_backend);
-        TryAddEncoderCandidate(candidates, available_encoders, preferred_encoder);
-
-        const CodecFamily family =
-            CodecFamilyFromEncoder(preferred_encoder.empty() ? normalized_base_encoder : preferred_encoder);
+        const std::wstring normalized_base_encoder = pptxvp::helper::ToLowerAscii(base_encoder);
+        const ResolvedAccelerationBackend explicit_encoder_backend = AccelerationBackendFromEncoder(normalized_base_encoder);
+        const CodecFamily family = CodecFamilyFromEncoder(normalized_base_encoder);
         const std::optional<std::wstring> software_encoder = EncoderForCodecFamily(family);
+        const bool can_remap_to_other_backends =
+            explicit_encoder_backend != ResolvedAccelerationBackend::Software ||
+            IsCanonicalSoftwareEncoder(normalized_base_encoder);
 
-        if (software_encoder.has_value())
+        for (const ResolvedAccelerationBackend backend : BuildBackendOrder(config, normalized_base_encoder))
         {
-            if (preferred_backend == ResolvedAccelerationBackend::Software)
+            std::wstring candidate_encoder;
+
+            if (backend == explicit_encoder_backend && explicit_encoder_backend != ResolvedAccelerationBackend::Software)
             {
-                TryAddEncoderCandidate(candidates, available_encoders, *software_encoder);
-                TryAddEncoderCandidate(
-                    candidates,
-                    available_encoders,
-                    ResolveHardwareAcceleratedEncoder(*software_encoder, ResolvedAccelerationBackend::MediaFoundation));
+                candidate_encoder = normalized_base_encoder;
+            }
+            else if (backend == ResolvedAccelerationBackend::Software)
+            {
+                if (explicit_encoder_backend != ResolvedAccelerationBackend::Software)
+                {
+                    if (!software_encoder.has_value())
+                    {
+                        continue;
+                    }
+
+                    candidate_encoder = *software_encoder;
+                }
+                else
+                {
+                    candidate_encoder = normalized_base_encoder;
+                }
             }
             else
             {
-                if (preferred_backend != ResolvedAccelerationBackend::MediaFoundation)
+                if (!can_remap_to_other_backends || !software_encoder.has_value())
                 {
-                    TryAddEncoderCandidate(
-                        candidates,
-                        available_encoders,
-                        ResolveHardwareAcceleratedEncoder(*software_encoder, ResolvedAccelerationBackend::MediaFoundation));
+                    continue;
                 }
 
-                TryAddEncoderCandidate(candidates, available_encoders, *software_encoder);
+                candidate_encoder = ResolveHardwareAcceleratedEncoder(*software_encoder, backend);
             }
+
+            TryAddEncoderCandidate(
+                candidates,
+                ffmpeg_path,
+                available_encoders,
+                candidate_encoder,
+                encoder_operational_cache);
         }
 
         if (candidates.empty())
         {
-            candidates.push_back(preferred_encoder.empty() ? normalized_base_encoder : preferred_encoder);
+            candidates.push_back(normalized_base_encoder);
         }
 
         return candidates;
@@ -1183,10 +1150,8 @@ namespace pptxvp
         const std::vector<std::filesystem::path> candidates = FindCandidateMediaFiles(media_directory);
         const auto processing_started_at = std::chrono::steady_clock::now();
         const std::unordered_set<std::wstring> available_encoders = QueryAvailableEncoders(ffmpeg_path);
-        const AdapterPresence adapters = DetectAdapterPresence();
-        const ResolvedAccelerationBackend selected_backend =
-            ResolvePreferredAccelerationBackend(config, available_encoders, adapters);
-        summary.acceleration_backend = DescribeAccelerationBackend(selected_backend);
+        EncoderOperationalCache encoder_operational_cache;
+        summary.acceleration_backend = DescribeRequestedAcceleration(config);
 
         for (std::size_t index = 0; index < candidates.size(); ++index)
         {
@@ -1276,8 +1241,10 @@ namespace pptxvp
             }
 
             const std::vector<std::wstring> encoder_candidates =
-                BuildEncoderCandidates(*encoder, selected_backend, available_encoders);
-            const std::wstring preferred_acceleration_label = DescribeAccelerationBackend(selected_backend);
+                BuildEncoderCandidates(ffmpeg_path, *encoder, config, available_encoders, encoder_operational_cache);
+            const std::wstring preferred_acceleration_label = encoder_candidates.empty()
+                ? summary.acceleration_backend
+                : DescribeAccelerationBackend(AccelerationBackendFromEncoder(encoder_candidates.front()));
             TranscodeAttempt attempt;
             std::wstring used_encoder;
             std::wstring acceleration_label = preferred_acceleration_label;

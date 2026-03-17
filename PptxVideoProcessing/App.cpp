@@ -8,6 +8,7 @@ import PptxVideoProcessing.Archive;
 import PptxVideoProcessing.Config;
 import PptxVideoProcessing.Helper.Console;
 import PptxVideoProcessing.Helper.FileSystem;
+import PptxVideoProcessing.Helper.Process;
 import PptxVideoProcessing.Helper.Utf;
 import PptxVideoProcessing.Media;
 import PptxVideoProcessing.OfficeXml;
@@ -15,9 +16,138 @@ import PptxVideoProcessing.Ui;
 
 namespace
 {
+    constexpr int SupportedFfmpegMajorVersion = 7;
+    constexpr int SupportedFfmpegMaxMinorVersion = 1;
+    constexpr int SupportedFfmpegLibavcodecMajor = 61;
+    constexpr std::wstring_view SupportedFfmpegReleaseRange = L"FFmpeg 7.0.x / 7.1.x 稳定发行版";
+
+    struct FfmpegBuildInfo
+    {
+        std::wstring version_line;
+        std::optional<int> major_version;
+        std::optional<int> minor_version;
+        bool is_git_build{};
+        std::optional<int> libavcodec_major;
+    };
+
     [[nodiscard]] std::runtime_error MakeAppError(std::wstring_view message)
     {
         return std::runtime_error(pptxvp::helper::WideToUtf8(message));
+    }
+
+    [[nodiscard]] std::string_view TrimAsciiWhitespace(std::string_view text)
+    {
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+        {
+            text.remove_prefix(1);
+        }
+
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+        {
+            text.remove_suffix(1);
+        }
+
+        return text;
+    }
+
+    [[nodiscard]] std::optional<FfmpegBuildInfo> QueryFfmpegBuildInfo(const std::filesystem::path& ffmpeg_path)
+    {
+        const pptxvp::helper::ProcessResult result =
+            pptxvp::helper::RunProcess(ffmpeg_path, {L"-version"}, ffmpeg_path.parent_path());
+
+        if (result.exit_code != 0)
+        {
+            return std::nullopt;
+        }
+
+        FfmpegBuildInfo info;
+        std::istringstream stream(result.output);
+        std::string line;
+        static const std::regex version_regex(R"(^ffmpeg version\s+(?:n)?(\d+)\.(\d+)(?:\.(\d+))?)", std::regex::icase);
+        static const std::regex libavcodec_regex(R"(libavcodec\s+(\d+)\.\s*\d+\.\s*\d+)", std::regex::icase);
+        std::smatch match;
+
+        while (std::getline(stream, line))
+        {
+            const std::string trimmed_line(TrimAsciiWhitespace(line));
+
+            if (trimmed_line.empty())
+            {
+                continue;
+            }
+
+            if (info.version_line.empty() &&
+                trimmed_line.starts_with("ffmpeg version "))
+            {
+                info.version_line = pptxvp::helper::Utf8ToWide(trimmed_line);
+                info.is_git_build = trimmed_line.find("git-") != std::string::npos;
+
+                if (std::regex_search(trimmed_line, match, version_regex))
+                {
+                    info.major_version = std::stoi(match[1].str());
+                    info.minor_version = std::stoi(match[2].str());
+                }
+            }
+
+            if (!info.libavcodec_major.has_value() &&
+                std::regex_search(trimmed_line, match, libavcodec_regex))
+            {
+                info.libavcodec_major = std::stoi(match[1].str());
+            }
+        }
+
+        return info.version_line.empty() ? std::nullopt : std::optional<FfmpegBuildInfo>(std::move(info));
+    }
+
+    void ValidateFfmpegBuild(const std::filesystem::path& ffmpeg_path)
+    {
+        const std::optional<FfmpegBuildInfo> build_info = QueryFfmpegBuildInfo(ffmpeg_path);
+
+        if (!build_info.has_value())
+        {
+            throw MakeAppError(
+                L"无法识别 ffmpeg 版本信息。当前软件仅支持 " + std::wstring(SupportedFfmpegReleaseRange) +
+                L"（libavcodec " + std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+        }
+
+        if (build_info->is_git_build)
+        {
+            throw MakeAppError(
+                L"检测到不受支持的 ffmpeg git/nightly build： " + build_info->version_line +
+                L"。为避免 NVENC 驱动门槛被新 nightly 抬高，当前软件已锁定到 " +
+                std::wstring(SupportedFfmpegReleaseRange) + L"（libavcodec " +
+                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+        }
+
+        if (!build_info->major_version.has_value() || !build_info->minor_version.has_value())
+        {
+            throw MakeAppError(
+                L"无法解析 ffmpeg 版本号： " + build_info->version_line + L"。当前软件仅支持 " +
+                std::wstring(SupportedFfmpegReleaseRange) + L"（libavcodec " +
+                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+        }
+
+        if (*build_info->major_version != SupportedFfmpegMajorVersion ||
+            *build_info->minor_version > SupportedFfmpegMaxMinorVersion)
+        {
+            throw MakeAppError(
+                L"当前 ffmpeg 版本不在支持范围内： " + build_info->version_line + L"。当前软件仅支持 " +
+                std::wstring(SupportedFfmpegReleaseRange) + L"（libavcodec " +
+                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+        }
+
+        if (build_info->libavcodec_major != SupportedFfmpegLibavcodecMajor)
+        {
+            const std::wstring detected_libavcodec =
+                build_info->libavcodec_major.has_value()
+                ? std::to_wstring(*build_info->libavcodec_major)
+                : std::wstring(L"未知");
+            throw MakeAppError(
+                L"当前 ffmpeg 的 libavcodec 版本不在支持范围内： " + build_info->version_line +
+                L"。检测到 libavcodec " + detected_libavcodec +
+                L"，当前软件仅支持 libavcodec " +
+                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x。");
+        }
     }
 
     [[nodiscard]] std::wstring StatusPrefix(pptxvp::MediaActionStatus status)
@@ -137,6 +267,8 @@ namespace pptxvp
             throw MakeAppError(
                 L"未在程序同目录找到 ffmpeg.exe，期望路径为： " + request.ffmpeg_path.wstring());
         }
+
+        ValidateFfmpegBuild(request.ffmpeg_path);
 
         EmitStage(progress_callback, ProcessStage::LoadingConfig, L"正在读取 config.json...");
         const AppConfig config = LoadConfig(request.config_path);

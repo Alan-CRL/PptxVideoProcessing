@@ -58,7 +58,7 @@
                         <TextBlock
                             x:Name="CurrentAccelerationText"
                             Opacity="0.78"
-                            Text="当前加速：系统原生 (Media Foundation)" />
+                            Text="当前加速：自动识别中" />
                         <ProgressBar
                             x:Name="CurrentFileProgressBar"
                             Minimum="0"

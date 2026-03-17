@@ -164,7 +164,7 @@ namespace pptxvp
     {
         if (!std::filesystem::exists(config_path))
         {
-            helper::WriteTextFileUtf8(config_path, "{}");
+            helper::WriteTextFileUtf8(config_path, "{\"hardwareAcceleration\":\"auto\"}\n");
         }
 
         const std::string content = helper::ReadTextFileUtf8(config_path);
@@ -234,6 +234,10 @@ namespace pptxvp
 
             config.hardware_acceleration =
                 ParseHardwareAcceleration(helper::Utf8ToWide(document["hardwareAcceleration"].get<std::string>()));
+        }
+        else
+        {
+            config.hardware_acceleration = HardwareAcceleration::Auto;
         }
 
         if (document.contains("preset"))

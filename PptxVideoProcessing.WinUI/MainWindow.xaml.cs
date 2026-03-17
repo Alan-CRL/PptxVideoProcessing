@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage;
 using Microsoft.UI.Windowing;
@@ -24,6 +25,10 @@ public sealed partial class MainWindow : Window
     private const string SystemNativeAcceleration = "系统原生 (Media Foundation)";
     private const string AutoAcceleration = "自动识别中";
     private const string SoftwareAcceleration = "纯软件";
+    private const string SupportedFfmpegReleaseRange = "FFmpeg 7.0.x / 7.1.x 稳定发行版";
+    private const int SupportedFfmpegMajorVersion = 7;
+    private const int SupportedFfmpegMaxMinorVersion = 1;
+    private const int SupportedFfmpegLibavcodecMajor = 61;
     private const int OpenFileDialogBufferSize = 65536;
     private const int DefaultWindowWidth = 1240;
     private const int DefaultWindowHeight = 1000;
@@ -52,8 +57,8 @@ public sealed partial class MainWindow : Window
     private bool _closeConfirmationPending;
     private bool _configHasVideoChanges;
     private bool _isProcessing;
-    private string _configuredAccelerationLabel = SystemNativeAcceleration;
-    private string _activeAccelerationLabel = SystemNativeAcceleration;
+    private string _configuredAccelerationLabel = AutoAcceleration;
+    private string _activeAccelerationLabel = AutoAcceleration;
     private bool _stopQueueAfterCurrentJob;
     private bool _queueClearedDuringProcessing;
     private double? _currentFilePercent;
@@ -61,6 +66,12 @@ public sealed partial class MainWindow : Window
     private nint _windowHandle;
     private nint _originalWindowProcedure;
     private WindowProcedure? _windowProcedureDelegate;
+
+    private sealed record FfmpegBuildInfo(
+        string VersionLine,
+        Version? ProductVersion,
+        bool IsGitBuild,
+        int? LibavcodecMajor);
 
     public MainWindow()
     {
@@ -76,6 +87,11 @@ public sealed partial class MainWindow : Window
             string message = $"程序目录未找到 ffmpeg.exe。请将 ffmpeg.exe 放到 {_ffmpegPath} 后再开始处理。";
             App.WriteDiagnosticLog("主窗口", message);
             ShowInfoBar(message, InfoBarSeverity.Warning);
+        }
+        else if (!TryValidateFfmpegBuild(out string? ffmpegValidationMessage))
+        {
+            App.WriteDiagnosticLog("主窗口", ffmpegValidationMessage ?? "ffmpeg 版本校验失败。");
+            ShowInfoBar(ffmpegValidationMessage ?? "ffmpeg 版本校验失败。", InfoBarSeverity.Warning);
         }
     }
 
@@ -925,16 +941,142 @@ public sealed partial class MainWindow : Window
     private void SetCurrentAcceleration(string accelerationLabel)
     {
         _activeAccelerationLabel = string.IsNullOrWhiteSpace(accelerationLabel)
-            ? SystemNativeAcceleration
+            ? AutoAcceleration
             : accelerationLabel;
         CurrentAccelerationText.Text = $"当前加速：{_activeAccelerationLabel}";
+    }
+
+    private bool TryValidateFfmpegBuild(out string? blockingMessage)
+    {
+        blockingMessage = null;
+
+        if (!TryReadFfmpegBuildInfo(_ffmpegPath, out FfmpegBuildInfo? buildInfo, out string? readErrorMessage))
+        {
+            blockingMessage = readErrorMessage;
+            return false;
+        }
+
+        blockingMessage = ValidateFfmpegBuild(buildInfo!);
+        return string.IsNullOrWhiteSpace(blockingMessage);
+    }
+
+    private static bool TryReadFfmpegBuildInfo(
+        string ffmpegPath,
+        out FfmpegBuildInfo? buildInfo,
+        out string? errorMessage)
+    {
+        buildInfo = null;
+        errorMessage = null;
+
+        try
+        {
+            using Process process = new()
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = "-version",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8,
+                },
+            };
+
+            process.Start();
+            string standardOutput = process.StandardOutput.ReadToEnd();
+            string standardError = process.StandardError.ReadToEnd();
+
+            if (!process.WaitForExit(10000))
+            {
+                process.Kill(entireProcessTree: true);
+                errorMessage = $"读取 ffmpeg 版本信息超时：{ffmpegPath}";
+                return false;
+            }
+
+            string combinedOutput = string.IsNullOrWhiteSpace(standardError)
+                ? standardOutput
+                : string.Concat(standardOutput, Environment.NewLine, standardError);
+            string[] lines = combinedOutput
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            string? versionLine = lines.FirstOrDefault(line => line.StartsWith("ffmpeg version ", StringComparison.OrdinalIgnoreCase));
+
+            if (string.IsNullOrWhiteSpace(versionLine))
+            {
+                errorMessage = $"无法识别 ffmpeg 版本输出：{ffmpegPath}";
+                return false;
+            }
+
+            Match versionMatch = Regex.Match(
+                versionLine,
+                @"ffmpeg version\s+(?:n)?(?<version>\d+\.\d+(?:\.\d+)?)",
+                RegexOptions.IgnoreCase);
+            Version? productVersion = null;
+
+            if (versionMatch.Success && Version.TryParse(versionMatch.Groups["version"].Value, out Version? parsedVersion))
+            {
+                productVersion = parsedVersion;
+            }
+
+            Match libavcodecMatch = Regex.Match(
+                combinedOutput,
+                @"libavcodec\s+(?<major>\d+)\.\s*\d+\.\s*\d+",
+                RegexOptions.IgnoreCase);
+            int? libavcodecMajor = null;
+
+            if (libavcodecMatch.Success &&
+                int.TryParse(libavcodecMatch.Groups["major"].Value, out int parsedLibavcodecMajor))
+            {
+                libavcodecMajor = parsedLibavcodecMajor;
+            }
+
+            buildInfo = new FfmpegBuildInfo(
+                VersionLine: versionLine,
+                ProductVersion: productVersion,
+                IsGitBuild: versionLine.Contains("git-", StringComparison.OrdinalIgnoreCase),
+                LibavcodecMajor: libavcodecMajor);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            errorMessage = $"读取 ffmpeg 版本信息失败。{exception.Message}";
+            return false;
+        }
+    }
+
+    private static string? ValidateFfmpegBuild(FfmpegBuildInfo buildInfo)
+    {
+        if (buildInfo.IsGitBuild)
+        {
+            return $"检测到不受支持的 ffmpeg git/nightly build：{buildInfo.VersionLine}。为避免 NVENC 驱动门槛被新 nightly 抬高，当前软件已锁定到 {SupportedFfmpegReleaseRange}（libavcodec {SupportedFfmpegLibavcodecMajor}.x），请替换为稳定版后重试。";
+        }
+
+        if (buildInfo.ProductVersion is null)
+        {
+            return $"无法解析 ffmpeg 版本号：{buildInfo.VersionLine}。当前软件仅支持 {SupportedFfmpegReleaseRange}（libavcodec {SupportedFfmpegLibavcodecMajor}.x）。";
+        }
+
+        if (buildInfo.ProductVersion.Major != SupportedFfmpegMajorVersion ||
+            buildInfo.ProductVersion.Minor > SupportedFfmpegMaxMinorVersion)
+        {
+            return $"当前 ffmpeg 版本不在支持范围内：{buildInfo.VersionLine}。当前软件仅支持 {SupportedFfmpegReleaseRange}（libavcodec {SupportedFfmpegLibavcodecMajor}.x）。";
+        }
+
+        if (buildInfo.LibavcodecMajor != SupportedFfmpegLibavcodecMajor)
+        {
+            return $"当前 ffmpeg 的 libavcodec 版本不在支持范围内：{buildInfo.VersionLine}。检测到 libavcodec {buildInfo.LibavcodecMajor?.ToString() ?? "未知"}，当前软件仅支持 libavcodec {SupportedFfmpegLibavcodecMajor}.x。";
+        }
+
+        return null;
     }
 
     private static string DescribeConfiguredAcceleration(string? rawValue)
     {
         if (string.IsNullOrWhiteSpace(rawValue))
         {
-            return SystemNativeAcceleration;
+            return AutoAcceleration;
         }
 
         string normalized = rawValue.Trim().ToLowerInvariant();
@@ -963,7 +1105,7 @@ public sealed partial class MainWindow : Window
         {
             "auto" => AutoAcceleration,
             "none" => SoftwareAcceleration,
-            _ => SystemNativeAcceleration,
+            _ => AutoAcceleration,
         };
     }
 
@@ -1049,7 +1191,7 @@ public sealed partial class MainWindow : Window
         };
         ComboBox accelerationComboBox = CreateOptionsComboBox(
         [
-            ("默认：系统原生", string.Empty),
+            ("默认：自动识别", string.Empty),
             ("自动识别", "auto"),
             ("纯软件", "none"),
             ("NVIDIA", "nvidia"),
@@ -1093,7 +1235,7 @@ public sealed partial class MainWindow : Window
             Opacity = 0.78,
         });
         panel.Children.Add(CreateOptionsEditorField("视频编码器", "常用可写 h264、h265、av1、mpeg4，也支持直接写 libx264、h264_nvenc 这类 ffmpeg 编码器名。", encoderTextBox));
-        panel.Children.Add(CreateOptionsEditorField("硬件加速", "缺省时优先尝试系统原生加速；“自动识别”会根据本机显卡和 ffmpeg 支持自动选择。", accelerationComboBox));
+        panel.Children.Add(CreateOptionsEditorField("硬件加速", "缺省时按 auto 自动识别，并优先尝试本机真正可用的 NVIDIA / Intel / AMD / 系统原生编码。", accelerationComboBox));
         panel.Children.Add(CreateOptionsEditorField("编码预设", "用于平衡速度与压缩效率。留空时使用编码器默认值；常见如 medium、fast、p4、p5。", presetTextBox));
         panel.Children.Add(CreateOptionsEditorField("目标帧率", "只填正整数，例如 24、30、60。留空表示不修改帧率。", frameRateTextBox));
         panel.Children.Add(CreateOptionsEditorField("目标分辨率", "按目标高度缩放并保持宽高比。留空表示保持原分辨率。", resolutionComboBox));
@@ -1189,7 +1331,7 @@ public sealed partial class MainWindow : Window
 
         JsonElement root = document.RootElement;
         options.Encoder = ReadString(root, "encoder", string.Empty);
-        options.HardwareAcceleration = ReadString(root, "hardwareAcceleration", string.Empty);
+        options.HardwareAcceleration = ReadString(root, "hardwareAcceleration", options.HardwareAcceleration);
         options.Preset = ReadString(root, "preset", string.Empty);
         options.FrameRate = root.TryGetProperty("frameRate", out JsonElement frameRate) ? frameRate.ToString() : string.Empty;
         options.Resolution = ReadString(root, "resolution", string.Empty);
@@ -1507,7 +1649,7 @@ public sealed partial class MainWindow : Window
         blockingMessage = null;
         advisoryMessage = null;
         _configHasVideoChanges = false;
-        _configuredAccelerationLabel = SystemNativeAcceleration;
+        _configuredAccelerationLabel = AutoAcceleration;
 
         if (!File.Exists(_workerPath))
         {
@@ -1521,6 +1663,12 @@ public sealed partial class MainWindow : Window
             return false;
         }
 
+        if (!TryValidateFfmpegBuild(out string? ffmpegValidationMessage))
+        {
+            blockingMessage = ffmpegValidationMessage;
+            return false;
+        }
+
         return TryInspectConfig(out blockingMessage, out advisoryMessage);
     }
 
@@ -1529,11 +1677,11 @@ public sealed partial class MainWindow : Window
         blockingMessage = null;
         advisoryMessage = null;
         _configHasVideoChanges = false;
-        _configuredAccelerationLabel = SystemNativeAcceleration;
+        _configuredAccelerationLabel = AutoAcceleration;
 
         if (!File.Exists(_configPath))
         {
-            advisoryMessage = "未找到 config.json，程序会自动创建空配置；如果未设置 encoder、frameRate 或 resolution，本次不会生成新的输出文件。";
+            advisoryMessage = "未找到 config.json，程序会自动创建默认配置（hardwareAcceleration=auto）；如果未设置 encoder、frameRate 或 resolution，本次不会生成新的输出文件。";
             return true;
         }
 

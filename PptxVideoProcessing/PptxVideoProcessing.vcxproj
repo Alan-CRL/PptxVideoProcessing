@@ -125,7 +125,7 @@
   <Target Name="PrepareWorkerRuntimeAssets" AfterTargets="Build">
     <WriteLinesToFile
       File="$(OutDir)config.json"
-      Lines="{}"
+      Lines="{&quot;hardwareAcceleration&quot;:&quot;auto&quot;}"
       Overwrite="false"
       Condition="!Exists('$(OutDir)config.json')" />
     <Copy
