@@ -11,4 +11,8 @@ internal sealed class ProcessingOptionsConfig
     public string FrameRate { get; set; } = string.Empty;
 
     public string Resolution { get; set; } = string.Empty;
+
+    public int VolumePercent { get; set; } = 100;
+
+    public bool Mute { get; set; }
 }

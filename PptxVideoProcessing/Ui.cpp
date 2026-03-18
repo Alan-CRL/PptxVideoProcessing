@@ -138,7 +138,7 @@ namespace
 
 namespace pptxvp
 {
-    std::filesystem::path PickPowerPointFile()
+    std::filesystem::path PickInputFile()
     {
         ComApartment com_apartment;
 
@@ -162,12 +162,14 @@ namespace pptxvp
         dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
 
         const COMDLG_FILTERSPEC filters[] = {
+            {L"支持的文件 (*.pptx;*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts)", L"*.pptx;*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts"},
             {L"PPTX 演示文稿 (*.pptx)", L"*.pptx"},
+            {L"视频文件 (*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts)", L"*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts"},
         };
 
         dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
         dialog->SetDefaultExtension(L"pptx");
-        dialog->SetTitle(L"请选择要处理的 PPTX 文件");
+        dialog->SetTitle(L"请选择要处理的 PPTX 或视频文件");
 
         const HRESULT show_result = dialog->Show(nullptr);
 

@@ -6,7 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:PptxVideoProcessing.WinUI"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Title="PPT 视频处理"
+    Title="PPT / 视频处理"
     mc:Ignorable="d">
 
     <Window.SystemBackdrop>
@@ -27,10 +27,10 @@
             Spacing="6">
             <TextBlock
                 Style="{ThemeResource TitleLargeTextBlockStyle}"
-                Text="PPTX 视频处理" />
+                Text="PPT / 视频处理" />
             <TextBlock
                 Opacity="0.74"
-                Text="选择一个或多个 PPTX 文件后，按顺序处理其中的内嵌视频，并在原文件旁生成新的输出文件。" />
+                Text="选择一个或多个 PPTX 或常见视频文件后，按顺序处理视频内容，并在原文件旁生成新的输出文件。" />
         </StackPanel>
 
         <Border
@@ -54,7 +54,7 @@
                         <TextBlock
                             x:Name="CurrentPptxText"
                             Opacity="0.78"
-                            Text="当前 PPTX：尚未开始" />
+                            Text="当前文件：尚未开始" />
                         <TextBlock
                             x:Name="CurrentAccelerationText"
                             Opacity="0.78"
@@ -191,11 +191,18 @@
                                             HorizontalAlignment="Center"
                                             VerticalAlignment="Center"
                                             Spacing="8">
-                                            <Button
-                                                Click="RemoveJobButton_Click"
+                                           <Button
+                                                Click="PrimaryJobActionButton_Click"
                                                 Content="{x:Bind PrimaryActionText, Mode=OneWay}"
                                                 MinWidth="84"
-                                                Tag="{x:Bind}" />
+                                                Tag="{x:Bind}"
+                                                Visibility="{x:Bind PrimaryActionVisibility, Mode=OneWay}" />
+                                            <Button
+                                                Click="SecondaryJobActionButton_Click"
+                                                Content="{x:Bind SecondaryActionText, Mode=OneWay}"
+                                                MinWidth="84"
+                                                Tag="{x:Bind}"
+                                                Visibility="{x:Bind SecondaryActionVisibility, Mode=OneWay}" />
                                             <Button
                                                 Click="ToggleDetailsButton_Click"
                                                 Content="{x:Bind DetailsActionText, Mode=OneWay}"
@@ -235,7 +242,7 @@
                 x:Name="SelectButton"
                 Click="SelectPptxButton_Click"
                 Icon="OpenFile"
-                Label="选择 PPTX" />
+                Label="选择文件" />
             <AppBarButton
                 x:Name="OptionsButton"
                 Click="ConfigureOptionsButton_Click"
@@ -245,7 +252,12 @@
                 x:Name="StartButton"
                 Click="StartProcessingButton_Click"
                 Icon="Play"
-                Label="开始处理" />
+                Label="全部开始处理" />
+            <AppBarButton
+                x:Name="RetryFailedButton"
+                Click="RetryFailedButton_Click"
+                Icon="Refresh"
+                Label="失败重试" />
             <AppBarButton
                 x:Name="ClearFinishedButton"
                 Click="ClearFinishedButton_Click"
@@ -262,16 +274,24 @@
                 Icon="Cancel"
                 Label="退出软件" />
         </CommandBar>
-        <StackPanel
+        <Grid
             Grid.Row="4"
             Margin="24,12,24,20"
-            Spacing="4">
+            ColumnDefinitions="*,Auto">
+            <StackPanel Spacing="4">
+                <TextBlock
+                    Opacity="0.72"
+                    Text="版权所有 (c) 2026 AlanCRL(陈润林) 工作室" />
+                <TextBlock
+                    Opacity="0.72"
+                    Text="本项目基于 GNU 通用公共许可证第 3 版获得许可" />
+            </StackPanel>
             <TextBlock
+                Grid.Column="1"
+                HorizontalAlignment="Right"
                 Opacity="0.72"
-                Text="版权所有 (c) 2026 AlanCRL(陈润林) 工作室" />
-            <TextBlock
-                Opacity="0.72"
-                Text="本项目基于 GNU 通用公共许可证第 3 版获得许可" />
-        </StackPanel>
+                VerticalAlignment="Bottom"
+                Text="版本 1.0" />
+        </Grid>
     </Grid>
 </Window>

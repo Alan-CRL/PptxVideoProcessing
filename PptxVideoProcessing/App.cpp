@@ -182,7 +182,7 @@ namespace
 
         if (copied_original)
         {
-            pptxvp::helper::WriteLine(L"由于没有媒体文件发生变更，本次直接复制了原始 PPTX。");
+            pptxvp::helper::WriteLine(L"由于没有媒体文件发生变更，本次直接复制了原始文件。");
         }
 
         for (const pptxvp::MediaActionResult& item : summary.items)
@@ -215,7 +215,7 @@ namespace
         }
         else
         {
-            pptxvp::helper::WriteLine(L"输出文件：本次未生成新的 PPTX。");
+            pptxvp::helper::WriteLine(L"输出文件：本次未生成新的输出文件。");
         }
     }
 
@@ -251,6 +251,117 @@ namespace
             .acceleration_backend = std::wstring(acceleration_backend),
         });
     }
+
+    [[nodiscard]] bool IsSupportedDirectMediaInputExtension(std::wstring_view extension)
+    {
+        static const std::array<std::wstring_view, 13> extensions = {
+            L".mp4",
+            L".m4v",
+            L".mov",
+            L".avi",
+            L".wmv",
+            L".mkv",
+            L".webm",
+            L".flv",
+            L".mpeg",
+            L".mpg",
+            L".ts",
+            L".mts",
+            L".m2ts",
+        };
+
+        return std::ranges::find(extensions, extension) != extensions.end();
+    }
+
+    [[nodiscard]] std::filesystem::path BuildDirectMediaOutputPath(
+        const std::filesystem::path& input_path,
+        const std::filesystem::path& processed_path)
+    {
+        const std::filesystem::path desired = input_path.parent_path() /
+            std::filesystem::path(input_path.stem().wstring() + L"_已处理" + processed_path.extension().wstring());
+        return pptxvp::helper::MakeUniqueSiblingPath(desired);
+    }
+
+    [[nodiscard]] pptxvp::ProcessResult ProcessDirectMedia(
+        const pptxvp::ProcessRequest& request,
+        const pptxvp::AppConfig& config,
+        const pptxvp::ProgressCallback& progress_callback)
+    {
+        pptxvp::helper::ScopedTempDirectory working_directory =
+            pptxvp::helper::CreateUniqueTempDirectory(L"pptxvp-media");
+        const std::filesystem::path media_directory = working_directory.path() / L"ppt" / L"media";
+        std::filesystem::create_directories(media_directory);
+
+        const std::filesystem::path staged_input = media_directory / request.input_path.filename();
+        std::filesystem::copy_file(request.input_path, staged_input, std::filesystem::copy_options::overwrite_existing);
+
+        EmitStage(progress_callback, pptxvp::ProcessStage::ProcessingMedia, L"正在处理视频...");
+        pptxvp::MediaProcessSummary summary = pptxvp::ProcessMedia(
+            working_directory.path(),
+            request.ffmpeg_path,
+            config,
+            progress_callback
+                ? pptxvp::MediaProgressCallback([&](const pptxvp::MediaProgressInfo& media_progress)
+                    {
+                        EmitStage(
+                            progress_callback,
+                            pptxvp::ProcessStage::ProcessingMedia,
+                            media_progress.note.empty() ? L"正在处理视频..." : media_progress.note,
+                            request.input_path,
+                            media_progress.current_index,
+                            media_progress.total_count,
+                            media_progress.file_percent,
+                            media_progress.speed,
+                            media_progress.acceleration_backend);
+                    })
+                : pptxvp::MediaProgressCallback{});
+
+        std::filesystem::path output_path;
+
+        if (summary.AnyChanges())
+        {
+            const auto processed_item = std::ranges::find_if(
+                summary.items,
+                [](const pptxvp::MediaActionResult& item)
+                {
+                    return item.status == pptxvp::MediaActionStatus::Processed;
+                });
+
+            if (processed_item != summary.items.end())
+            {
+                output_path = BuildDirectMediaOutputPath(request.input_path, processed_item->output_path);
+                std::filesystem::copy_file(processed_item->output_path, output_path);
+                processed_item->output_path = output_path;
+            }
+        }
+
+        const std::wstring acceleration_backend = summary.acceleration_backend;
+
+        pptxvp::ProcessResult result{
+            .input_path = request.input_path,
+            .output_path = output_path,
+            .summary = std::move(summary),
+            .copied_original = false,
+            .acceleration_backend = acceleration_backend,
+        };
+
+        if (!progress_callback)
+        {
+            PrintSummary(result.summary, result.input_path, result.output_path, result.copied_original);
+        }
+
+        EmitStage(
+            progress_callback,
+            pptxvp::ProcessStage::Completed,
+            result.output_path.empty() ? L"未生成新的输出文件。" : L"处理完成。",
+            result.output_path,
+            0,
+            0,
+            std::nullopt,
+            {},
+            result.acceleration_backend);
+        return result;
+    }
 }
 
 namespace pptxvp
@@ -259,7 +370,7 @@ namespace pptxvp
     {
         if (request.input_path.empty())
         {
-            throw MakeAppError(L"未提供要处理的 PPTX 文件路径。");
+            throw MakeAppError(L"未提供要处理的文件路径。");
         }
 
         if (!std::filesystem::exists(request.ffmpeg_path))
@@ -281,9 +392,12 @@ namespace pptxvp
             throw MakeAppError(L"当前版本仅支持 .pptx，不支持旧版二进制 .ppt 文件。");
         }
 
-        if (extension != L".pptx")
+        const bool is_pptx_input = extension == L".pptx";
+        const bool is_direct_media_input = IsSupportedDirectMediaInputExtension(extension);
+
+        if (!is_pptx_input && !is_direct_media_input)
         {
-            throw MakeAppError(L"所选文件不是有效的 .pptx 演示文稿包。");
+            throw MakeAppError(L"所选文件不是受支持的 PPTX 或常见视频格式。");
         }
 
         if (!progress_callback)
@@ -291,7 +405,7 @@ namespace pptxvp
             helper::WriteLine(L"源文件： " + request.input_path.wstring());
         }
 
-        if (!config.HasVideoChanges())
+        if (!config.HasMediaChanges())
         {
             ProcessResult result{
                 .input_path = request.input_path,
@@ -308,6 +422,11 @@ namespace pptxvp
 
             EmitStage(progress_callback, ProcessStage::Completed, L"未生成新的输出文件。", {}, 0, 0, std::nullopt, {}, result.acceleration_backend);
             return result;
+        }
+
+        if (is_direct_media_input)
+        {
+            return ProcessDirectMedia(request, config, progress_callback);
         }
 
         helper::ScopedTempDirectory working_directory = helper::CreateUniqueTempDirectory(L"pptxvp");
@@ -380,8 +499,8 @@ namespace pptxvp
     {
         const std::filesystem::path executable_directory = helper::GetExecutableDirectory();
 
-        helper::WriteLine(L"请选择要处理的 PPTX 文件...");
-        const std::filesystem::path input_path = PickPowerPointFile();
+        helper::WriteLine(L"请选择要处理的 PPTX 或视频文件...");
+        const std::filesystem::path input_path = PickInputFile();
 
         if (input_path.empty())
         {

@@ -250,6 +250,33 @@ namespace pptxvp
             config.preset = NormalizePreset(helper::Utf8ToWide(document["preset"].get<std::string>()));
         }
 
+        if (document.contains("volumePercent"))
+        {
+            if (!document["volumePercent"].is_number_integer())
+            {
+                throw MakeConfigError(L"config.json 中的 volumePercent 必须是整数。");
+            }
+
+            const int volume_percent = document["volumePercent"].get<int>();
+
+            if (volume_percent < 0 || volume_percent > 300)
+            {
+                throw MakeConfigError(L"config.json 中的 volumePercent 必须在 0 到 300 之间。");
+            }
+
+            config.volume_percent = volume_percent;
+        }
+
+        if (document.contains("mute"))
+        {
+            if (!document["mute"].is_boolean())
+            {
+                throw MakeConfigError(L"config.json 中的 mute 必须是布尔值。");
+            }
+
+            config.mute = document["mute"].get<bool>();
+        }
+
         return config;
     }
 }

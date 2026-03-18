@@ -17,15 +17,19 @@ namespace PptxVideoProcessing.WinUI;
 
 public sealed partial class MainWindow : Window
 {
-    private const string PendingStatus = "待处理";
+    private const string PendingStatus = "未开始";
     private const string ProcessingStatus = "处理中";
+    private const string PausedStatus = "已暂停";
+    private const string StoppedStatus = "已停止";
     private const string FailedStatus = "失败";
     private const string SkippedStatus = "跳过";
     private const string SuccessStatus = "成功";
+    private const string DisabledAcceleration = "未启用";
     private const string SystemNativeAcceleration = "系统原生 (Media Foundation)";
     private const string AutoAcceleration = "自动识别中";
     private const string SoftwareAcceleration = "纯软件";
     private const string SupportedFfmpegReleaseRange = "FFmpeg 7.0.x / 7.1.x 稳定发行版";
+    private const string QueueFileFilter = "支持的文件 (*.pptx;*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts)\0*.pptx;*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts\0PPTX 演示文稿 (*.pptx)\0*.pptx\0视频文件 (*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts)\0*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts\0\0";
     private const int SupportedFfmpegMajorVersion = 7;
     private const int SupportedFfmpegMaxMinorVersion = 1;
     private const int SupportedFfmpegLibavcodecMajor = 61;
@@ -48,11 +52,27 @@ public sealed partial class MainWindow : Window
     private readonly string _ffmpegPath = Path.Combine(App.RuntimeAssetsDirectory, "ffmpeg.exe");
     private readonly string _configPath = Path.Combine(App.RuntimeAssetsDirectory, "config.json");
     private readonly List<ProcessingJob> _activeBatchJobs = [];
+    private static readonly string[] SupportedVideoExtensions =
+    [
+        ".mp4",
+        ".m4v",
+        ".mov",
+        ".avi",
+        ".wmv",
+        ".mkv",
+        ".webm",
+        ".flv",
+        ".mpeg",
+        ".mpg",
+        ".ts",
+        ".mts",
+        ".m2ts",
+    ];
     private AppWindow? _appWindow;
     private Process? _currentWorkerProcess;
     private ProcessingJob? _currentJob;
     private Stopwatch? _currentJobStopwatch;
-    private ProcessingJob? _cancellationTargetJob;
+    private ProcessingJob? _workerInterruptionTargetJob;
     private bool _allowWindowClose;
     private bool _closeConfirmationPending;
     private bool _configHasVideoChanges;
@@ -63,6 +83,7 @@ public sealed partial class MainWindow : Window
     private bool _queueClearedDuringProcessing;
     private double? _currentFilePercent;
     private double _currentJobProgressFraction;
+    private WorkerInterruptionAction _workerInterruptionAction;
     private nint _windowHandle;
     private nint _originalWindowProcedure;
     private WindowProcedure? _windowProcedureDelegate;
@@ -72,6 +93,15 @@ public sealed partial class MainWindow : Window
         Version? ProductVersion,
         bool IsGitBuild,
         int? LibavcodecMajor);
+
+    private enum WorkerInterruptionAction
+    {
+        None,
+        Pause,
+        Stop,
+        Remove,
+        ClearAll,
+    }
 
     public MainWindow()
     {
@@ -126,21 +156,21 @@ public sealed partial class MainWindow : Window
     {
         try
         {
-            App.WriteDiagnosticLog("选择 PPTX", "用户点击了选择按钮。");
-            IReadOnlyList<string> selectedPaths = PickPptxFiles();
-            App.WriteDiagnosticLog("选择 PPTX", $"文件选择已返回，共 {selectedPaths.Count} 个文件。");
+            App.WriteDiagnosticLog("选择文件", "用户点击了选择按钮。");
+            IReadOnlyList<string> selectedPaths = PickQueueInputFiles();
+            App.WriteDiagnosticLog("选择文件", $"文件选择已返回，共 {selectedPaths.Count} 个文件。");
 
             if (selectedPaths.Count == 0)
             {
-                App.WriteDiagnosticLog("选择 PPTX", "用户取消了选择或没有返回任何文件。");
+                App.WriteDiagnosticLog("选择文件", "用户取消了选择或没有返回任何文件。");
                 return;
             }
 
-            AddPptxPathsToQueue(selectedPaths, "选择 PPTX");
+            AddQueueInputPaths(selectedPaths, "选择文件");
         }
         catch (Exception exception)
         {
-            HandleUiActionError("选择 PPTX 文件", exception);
+            HandleUiActionError("选择文件", exception);
         }
     }
 
@@ -149,7 +179,7 @@ public sealed partial class MainWindow : Window
         if (e.DataView.Contains(StandardDataFormats.StorageItems) || e.DataView.Contains(StandardDataFormats.Text))
         {
             e.AcceptedOperation = DataPackageOperation.Copy;
-            e.DragUIOverride.Caption = "拖入一个或多个 PPTX 文件";
+            e.DragUIOverride.Caption = "拖入一个或多个 PPTX 或视频文件";
             e.DragUIOverride.IsCaptionVisible = true;
             return;
         }
@@ -163,20 +193,20 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            IReadOnlyList<string> droppedPaths = await GetDroppedPptxPathsAsync(e.DataView);
-            App.WriteDiagnosticLog("拖拽导入", $"拖拽解析完成，共 {droppedPaths.Count} 个 PPTX 文件。");
+            IReadOnlyList<string> droppedPaths = await GetDroppedQueueInputPathsAsync(e.DataView);
+            App.WriteDiagnosticLog("拖拽导入", $"拖拽解析完成，共 {droppedPaths.Count} 个文件。");
 
             if (droppedPaths.Count == 0)
             {
-                ShowInfoBar("仅支持拖入一个或多个 .pptx 文件。", InfoBarSeverity.Informational);
+                ShowInfoBar("仅支持拖入一个或多个 PPTX 或常见视频文件。", InfoBarSeverity.Informational);
                 return;
             }
 
-            AddPptxPathsToQueue(droppedPaths, "拖拽导入");
+            AddQueueInputPaths(droppedPaths, "拖拽导入");
         }
         catch (Exception exception)
         {
-            HandleUiActionError("拖拽导入 PPTX 文件", exception);
+            HandleUiActionError("拖拽导入文件", exception);
         }
         finally
         {
@@ -184,7 +214,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void AddPptxPathsToQueue(IReadOnlyList<string> selectedPaths, string sourceLabel)
+    private void AddQueueInputPaths(IReadOnlyList<string> selectedPaths, string sourceLabel)
     {
         int addedCount = AddJobsToQueue(selectedPaths);
 
@@ -195,23 +225,23 @@ public sealed partial class MainWindow : Window
         else if (_isProcessing && !_stopQueueAfterCurrentJob)
         {
             RefreshBatchProgress();
-            ShowInfoBar($"已加入 {addedCount} 个 PPTX 文件，当前批次会继续处理。", InfoBarSeverity.Success);
+            ShowInfoBar($"已加入 {addedCount} 个文件，当前批次会继续处理。", InfoBarSeverity.Success);
         }
         else if (_isProcessing)
         {
-            ShowInfoBar($"已加入 {addedCount} 个 PPTX 文件。当前处理结束后，请重新点击开始处理。", InfoBarSeverity.Informational);
+            ShowInfoBar($"已加入 {addedCount} 个文件。当前处理结束后，请重新点击全部开始处理。", InfoBarSeverity.Informational);
         }
         else
         {
             ResetIdleState();
-            ShowInfoBar($"已加入 {addedCount} 个 PPTX 文件。", InfoBarSeverity.Success);
+            ShowInfoBar($"已加入 {addedCount} 个文件。", InfoBarSeverity.Success);
         }
 
         UpdateCommandStates();
         App.WriteDiagnosticLog(sourceLabel, $"队列更新完成，当前共有 {QueueItems.Count} 个文件。");
     }
 
-    private static async Task<IReadOnlyList<string>> GetDroppedPptxPathsAsync(DataPackageView dataView)
+    private static async Task<IReadOnlyList<string>> GetDroppedQueueInputPathsAsync(DataPackageView dataView)
     {
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -226,7 +256,7 @@ public sealed partial class MainWindow : Window
                     continue;
                 }
 
-                if (string.Equals(Path.GetExtension(item.Path), ".pptx", StringComparison.OrdinalIgnoreCase))
+                if (IsSupportedQueueInputPath(item.Path))
                 {
                     paths.Add(item.Path);
                 }
@@ -242,7 +272,7 @@ public sealed partial class MainWindow : Window
             {
                 string candidate = rawCandidate.Trim().Trim('"');
 
-                if (!string.Equals(Path.GetExtension(candidate), ".pptx", StringComparison.OrdinalIgnoreCase))
+                if (!IsSupportedQueueInputPath(candidate))
                 {
                     continue;
                 }
@@ -280,7 +310,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void RemoveJobButton_Click(object sender, RoutedEventArgs e)
+    private async void PrimaryJobActionButton_Click(object sender, RoutedEventArgs e)
     {
         try
         {
@@ -291,17 +321,56 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
-            if (_isProcessing && ReferenceEquals(job, _currentJob))
+            switch (job.Status)
             {
-                CancelCurrentJobAndRemove(job);
-                return;
+                case PendingStatus:
+                    await StartSingleJobAsync(job);
+                    break;
+                case ProcessingStatus:
+                    PauseJob(job);
+                    break;
+                case PausedStatus:
+                    await ContinuePausedJobAsync(job);
+                    break;
+                case StoppedStatus:
+                case FailedStatus:
+                case SkippedStatus:
+                case SuccessStatus:
+                    await RetryJobAsync(job);
+                    break;
             }
-
-            RemoveJobFromQueue(job, $"已移除 {job.FileName}。", InfoBarSeverity.Informational);
         }
         catch (Exception exception)
         {
-            HandleUiActionError("删除任务", exception);
+            HandleUiActionError("执行任务操作", exception);
+        }
+    }
+
+    private void SecondaryJobActionButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            ProcessingJob? job = GetJobFromSender(sender);
+
+            if (job is null)
+            {
+                return;
+            }
+
+            switch (job.Status)
+            {
+                case ProcessingStatus:
+                case PausedStatus:
+                    StopJob(job);
+                    break;
+                default:
+                    DeleteJob(job);
+                    break;
+            }
+        }
+        catch (Exception exception)
+        {
+            HandleUiActionError("执行任务操作", exception);
         }
     }
 
@@ -323,15 +392,53 @@ public sealed partial class MainWindow : Window
             HandleUiActionError("切换任务详情", exception);
         }
     }
+
+    private async void RetryFailedButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            List<ProcessingJob> failedJobs = QueueItems
+                .Where(job => job.Status == FailedStatus)
+                .ToList();
+
+            if (failedJobs.Count == 0)
+            {
+                ShowInfoBar("当前没有可重试的失败任务。", InfoBarSeverity.Informational);
+                return;
+            }
+
+            foreach (ProcessingJob job in failedJobs)
+            {
+                PrepareJobForRetry(job, "等待失败重试。");
+            }
+
+            if (_isProcessing)
+            {
+                ShowInfoBar($"已将 {failedJobs.Count} 个失败任务加入当前批次。", InfoBarSeverity.Informational);
+                RefreshBatchProgress();
+                UpdateCommandStates();
+                return;
+            }
+
+            await StartQueueProcessingAsync(failedJobs);
+        }
+        catch (Exception exception)
+        {
+            HandleUiActionError("失败重试", exception);
+        }
+    }
+
     private void ClearFinishedButton_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            List<ProcessingJob> jobsToRemove = QueueItems.Where(job => job.IsFinished).ToList();
+            List<ProcessingJob> jobsToRemove = QueueItems
+                .Where(job => job.Status == SuccessStatus)
+                .ToList();
 
             if (jobsToRemove.Count == 0)
             {
-                ShowInfoBar("当前没有可清理的已完成结果。", InfoBarSeverity.Informational);
+                ShowInfoBar("当前没有可清理的成功结果。", InfoBarSeverity.Informational);
                 return;
             }
 
@@ -341,9 +448,9 @@ public sealed partial class MainWindow : Window
                 QueueItems.Remove(job);
             }
 
-            App.WriteDiagnosticLog("队列操作", $"已清理 {jobsToRemove.Count} 个已完成结果。");
-            HandleQueueMutationAfterRemoval();
-            ShowInfoBar($"已清理 {jobsToRemove.Count} 个已完成/失败/跳过的任务。", InfoBarSeverity.Informational);
+            App.WriteDiagnosticLog("队列操作", $"已清理 {jobsToRemove.Count} 个成功结果。");
+            UpdateAfterQueueMutation();
+            ShowInfoBar($"已清理 {jobsToRemove.Count} 个成功任务。", InfoBarSeverity.Informational);
         }
         catch (Exception exception)
         {
@@ -373,12 +480,12 @@ public sealed partial class MainWindow : Window
 
                 if (_currentJob is not null)
                 {
-                    _cancellationTargetJob = _currentJob;
+                    MarkInterruptionRequested(_currentJob, WorkerInterruptionAction.ClearAll);
                 }
 
                 QueueItems.Clear();
                 _activeBatchJobs.Clear();
-                ResetIdleState("当前状态：队列已清空", "当前 PPTX：无", "当前视频(已清空)");
+                ResetIdleState("当前状态：队列已清空", "当前文件：无", "当前视频(已清空)");
                 UpdateCommandStates();
                 ShowInfoBar($"已清空 {clearedCount} 个队列项，正在终止当前处理。", InfoBarSeverity.Informational);
                 TerminateCurrentWorker();
@@ -387,7 +494,7 @@ public sealed partial class MainWindow : Window
 
             QueueItems.Clear();
             _activeBatchJobs.Clear();
-            ResetIdleState("当前状态：队列已清空", "当前 PPTX：无", "当前视频(已清空)");
+            ResetIdleState("当前状态：队列已清空", "当前文件：无", "当前视频(已清空)");
             UpdateCommandStates();
             ShowInfoBar($"已清空 {clearedCount} 个队列项。", InfoBarSeverity.Informational);
         }
@@ -494,7 +601,7 @@ public sealed partial class MainWindow : Window
         return addedJobs.Count;
     }
 
-    private async Task StartQueueProcessingAsync()
+    private async Task StartQueueProcessingAsync(IReadOnlyList<ProcessingJob>? requestedJobs = null)
     {
         if (_isProcessing)
         {
@@ -502,12 +609,17 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        List<ProcessingJob> jobsToRun = QueueItems.Where(IsReadyToStart).ToList();
+        List<ProcessingJob> jobsToRun = requestedJobs is null
+            ? QueueItems.Where(IsReadyToStart).ToList()
+            : requestedJobs
+                .Distinct()
+                .Where(job => job.Status == PendingStatus)
+                .ToList();
 
         if (jobsToRun.Count == 0)
         {
-            App.WriteDiagnosticLog("开始处理", "当前没有可处理的 PPTX 文件。");
-            ShowInfoBar("当前没有可处理的 PPTX 文件。", InfoBarSeverity.Informational);
+            App.WriteDiagnosticLog("开始处理", "当前没有可处理的文件。");
+            ShowInfoBar("当前没有可处理的文件。", InfoBarSeverity.Informational);
             return;
         }
 
@@ -523,22 +635,16 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        App.WriteDiagnosticLog("开始处理", $"准备处理 {jobsToRun.Count} 个 PPTX 文件。");
+        App.WriteDiagnosticLog("开始处理", $"准备处理 {jobsToRun.Count} 个文件。");
         _isProcessing = true;
         _stopQueueAfterCurrentJob = false;
         _queueClearedDuringProcessing = false;
-        _cancellationTargetJob = null;
+        _workerInterruptionTargetJob = null;
+        _workerInterruptionAction = WorkerInterruptionAction.None;
         _currentJob = null;
         _currentWorkerProcess = null;
         _currentJobStopwatch = null;
         _currentFilePercent = null;
-        foreach (ProcessingJob job in jobsToRun)
-        {
-            if (job.Status == FailedStatus)
-            {
-                job.MarkPending("等待重新处理。");
-            }
-        }
 
         _activeBatchJobs.Clear();
         _activeBatchJobs.AddRange(jobsToRun);
@@ -586,7 +692,8 @@ public sealed partial class MainWindow : Window
             _currentJobStopwatch = null;
             _currentFilePercent = null;
             _currentJobProgressFraction = 0.0;
-            _cancellationTargetJob = null;
+            _workerInterruptionTargetJob = null;
+            _workerInterruptionAction = WorkerInterruptionAction.None;
             _stopQueueAfterCurrentJob = false;
             _queueClearedDuringProcessing = false;
             _activeBatchJobs.Clear();
@@ -684,12 +791,15 @@ public sealed partial class MainWindow : Window
                 App.WriteDiagnosticLog("处理任务", $"worker 标准错误输出：{stderr.Trim()}");
             }
 
-            bool canceledByUser = ReferenceEquals(_cancellationTargetJob, job);
+            WorkerInterruptionAction interruptionAction = ReferenceEquals(_workerInterruptionTargetJob, job)
+                ? _workerInterruptionAction
+                : WorkerInterruptionAction.None;
 
-            if (canceledByUser)
+            if (interruptionAction != WorkerInterruptionAction.None)
             {
-                App.WriteDiagnosticLog("处理任务", $"任务已由用户取消：{job.InputPath}");
-                _cancellationTargetJob = null;
+                App.WriteDiagnosticLog("处理任务", $"任务已由用户中断：{job.InputPath}，动作={interruptionAction}");
+                _workerInterruptionTargetJob = null;
+                _workerInterruptionAction = WorkerInterruptionAction.None;
                 RefreshBatchProgress();
                 return;
             }
@@ -734,7 +844,7 @@ public sealed partial class MainWindow : Window
 
     private bool HandleWorkerMessage(ProcessingJob job, JsonElement root)
     {
-        if (ReferenceEquals(_cancellationTargetJob, job))
+        if (ReferenceEquals(_workerInterruptionTargetJob, job))
         {
             return false;
         }
@@ -846,7 +956,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private IReadOnlyList<string> PickPptxFiles()
+    private IReadOnlyList<string> PickQueueInputFiles()
     {
         IntPtr buffer = Marshal.AllocCoTaskMem(OpenFileDialogBufferSize * sizeof(char));
 
@@ -859,10 +969,10 @@ public sealed partial class MainWindow : Window
             {
                 lStructSize = Marshal.SizeOf<OPENFILENAME>(),
                 hwndOwner = WindowNative.GetWindowHandle(this),
-                lpstrFilter = "PowerPoint 演示文稿 (*.pptx)\0*.pptx\0\0",
+                lpstrFilter = QueueFileFilter,
                 lpstrFile = buffer,
                 nMaxFile = OpenFileDialogBufferSize,
-                lpstrTitle = "选择一个或多个 PPTX 文件",
+                lpstrTitle = "选择一个或多个 PPTX 或视频文件",
                 lpstrDefExt = "pptx",
                 Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR,
             };
@@ -880,8 +990,11 @@ public sealed partial class MainWindow : Window
             }
 
             string rawSelection = Marshal.PtrToStringUni(buffer, OpenFileDialogBufferSize) ?? string.Empty;
-            IReadOnlyList<string> results = ParseSelectedFiles(rawSelection);
-            App.WriteDiagnosticLog("选择 PPTX", $"系统文件对话框解析完成，共得到 {results.Count} 个文件。");
+            IReadOnlyList<string> results = ParseSelectedFiles(rawSelection)
+                .Where(IsSupportedQueueInputPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            App.WriteDiagnosticLog("选择文件", $"系统文件对话框解析完成，共得到 {results.Count} 个文件。");
             return results;
         }
         finally
@@ -895,7 +1008,7 @@ public sealed partial class MainWindow : Window
         ContentDialog dialog = new()
         {
             Title = "确认退出",
-            Content = "当前仍有 PPTX 正在处理。退出后会终止当前处理并结束剩余队列，是否继续？",
+            Content = "当前仍有文件正在处理。退出后会终止当前处理并结束剩余队列，是否继续？",
             PrimaryButtonText = "退出并终止处理",
             CloseButtonText = "继续处理",
             DefaultButton = ContentDialogButton.Close,
@@ -908,7 +1021,7 @@ public sealed partial class MainWindow : Window
     private void ResetProgressDisplay(int totalJobs)
     {
         CurrentStatusText.Text = "当前状态：准备开始";
-        CurrentPptxText.Text = "当前 PPTX：尚未开始";
+        CurrentPptxText.Text = "当前文件：尚未开始";
         CurrentDetailText.Text = "当前视频(准备中)";
         SetCurrentAcceleration(_configuredAccelerationLabel);
         CurrentFileProgressBar.IsIndeterminate = false;
@@ -921,7 +1034,7 @@ public sealed partial class MainWindow : Window
 
     private void ResetIdleState(
         string status = "当前状态：空闲",
-        string currentPptx = "当前 PPTX：尚未开始",
+        string currentPptx = "当前文件：尚未开始",
         string currentVideo = "当前视频(准备中)")
     {
         CurrentStatusText.Text = status;
@@ -1117,7 +1230,7 @@ public sealed partial class MainWindow : Window
         string? accelerationLabel = null)
     {
         CurrentStatusText.Text = $"当前状态：{status}";
-        CurrentPptxText.Text = $"当前 PPTX：{pptxName}";
+        CurrentPptxText.Text = $"当前文件：{pptxName}";
         CurrentDetailText.Text = detail;
         _currentFilePercent = filePercent;
 
@@ -1177,7 +1290,8 @@ public sealed partial class MainWindow : Window
         SelectButton.IsEnabled = true;
         OptionsButton.IsEnabled = !_isProcessing;
         StartButton.IsEnabled = !_isProcessing && QueueItems.Any(IsReadyToStart);
-        ClearFinishedButton.IsEnabled = QueueItems.Any(job => job.IsFinished);
+        RetryFailedButton.IsEnabled = QueueItems.Any(job => job.Status == FailedStatus);
+        ClearFinishedButton.IsEnabled = QueueItems.Any(job => job.Status == SuccessStatus);
         ClearAllButton.IsEnabled = QueueItems.Count > 0;
     }
 
@@ -1218,11 +1332,34 @@ public sealed partial class MainWindow : Window
             ("1080p", "1080p"),
             ("2160p", "2160p"),
         ], options.Resolution);
+        NumberBox volumeNumberBox = new()
+        {
+            Value = options.VolumePercent,
+            Minimum = 0,
+            Maximum = 300,
+            SmallChange = 5,
+            LargeChange = 25,
+            SpinButtonPlacementMode = NumberBoxSpinButtonPlacementMode.Compact,
+        };
+        CheckBox muteCheckBox = new()
+        {
+            Content = "静音（等同于 0%）",
+            IsChecked = options.Mute,
+        };
         TextBlock validationTextBlock = new()
         {
             TextWrapping = TextWrapping.WrapWholeWords,
             Visibility = Visibility.Collapsed,
         };
+
+        void UpdateVolumeEditorState()
+        {
+            volumeNumberBox.IsEnabled = muteCheckBox.IsChecked != true;
+        }
+
+        muteCheckBox.Checked += (_, _) => UpdateVolumeEditorState();
+        muteCheckBox.Unchecked += (_, _) => UpdateVolumeEditorState();
+        UpdateVolumeEditorState();
 
         StackPanel panel = new()
         {
@@ -1239,6 +1376,8 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(CreateOptionsEditorField("编码预设", "用于平衡速度与压缩效率。留空时使用编码器默认值；常见如 medium、fast、p4、p5。", presetTextBox));
         panel.Children.Add(CreateOptionsEditorField("目标帧率", "只填正整数，例如 24、30、60。留空表示不修改帧率。", frameRateTextBox));
         panel.Children.Add(CreateOptionsEditorField("目标分辨率", "按目标高度缩放并保持宽高比。留空表示保持原分辨率。", resolutionComboBox));
+        panel.Children.Add(CreateOptionsEditorField("音量百分比", "在原始音量基础上按 0% 到 300% 调整；100% 表示保持不变。", volumeNumberBox));
+        panel.Children.Add(CreateOptionsEditorField("静音", "勾选后会按 0% 输出音量，并覆盖上方音量百分比。", muteCheckBox));
         panel.Children.Add(validationTextBlock);
 
         ContentDialog dialog = new()
@@ -1265,6 +1404,8 @@ public sealed partial class MainWindow : Window
                     presetTextBox,
                     frameRateTextBox,
                     resolutionComboBox,
+                    volumeNumberBox,
+                    muteCheckBox,
                     out ProcessingOptionsConfig collectedOptions,
                     out string? validationMessage))
             {
@@ -1335,6 +1476,10 @@ public sealed partial class MainWindow : Window
         options.Preset = ReadString(root, "preset", string.Empty);
         options.FrameRate = root.TryGetProperty("frameRate", out JsonElement frameRate) ? frameRate.ToString() : string.Empty;
         options.Resolution = ReadString(root, "resolution", string.Empty);
+        options.VolumePercent = root.TryGetProperty("volumePercent", out JsonElement volumePercent) && volumePercent.TryGetInt32(out int parsedVolumePercent)
+            ? parsedVolumePercent
+            : 100;
+        options.Mute = ReadBool(root, "mute", false);
         return options;
     }
 
@@ -1356,6 +1501,7 @@ public sealed partial class MainWindow : Window
         SetOrRemoveJsonString(root, "hardwareAcceleration", options.HardwareAcceleration);
         SetOrRemoveJsonString(root, "preset", options.Preset);
         SetOrRemoveJsonString(root, "resolution", options.Resolution);
+        SetOrRemoveJsonBool(root, "mute", options.Mute);
 
         if (string.IsNullOrWhiteSpace(options.FrameRate))
         {
@@ -1364,6 +1510,15 @@ public sealed partial class MainWindow : Window
         else
         {
             root["frameRate"] = int.Parse(options.FrameRate);
+        }
+
+        if (options.VolumePercent == 100)
+        {
+            root.Remove("volumePercent");
+        }
+        else
+        {
+            root["volumePercent"] = options.VolumePercent;
         }
 
         string json = root.ToJsonString(new JsonSerializerOptions
@@ -1380,9 +1535,13 @@ public sealed partial class MainWindow : Window
         TextBox presetTextBox,
         TextBox frameRateTextBox,
         ComboBox resolutionComboBox,
+        NumberBox volumeNumberBox,
+        CheckBox muteCheckBox,
         out ProcessingOptionsConfig options,
         out string? validationMessage)
     {
+        double rawVolume = double.IsNaN(volumeNumberBox.Value) ? 100.0 : volumeNumberBox.Value;
+
         options = new ProcessingOptionsConfig
         {
             Encoder = NormalizeOptionalText(encoderTextBox.Text),
@@ -1390,11 +1549,19 @@ public sealed partial class MainWindow : Window
             Preset = NormalizeOptionalText(presetTextBox.Text),
             FrameRate = NormalizeOptionalText(frameRateTextBox.Text),
             Resolution = GetSelectedComboBoxValue(resolutionComboBox),
+            VolumePercent = (int)Math.Round(rawVolume),
+            Mute = muteCheckBox.IsChecked == true,
         };
 
         if (!string.IsNullOrWhiteSpace(options.FrameRate) && (!int.TryParse(options.FrameRate, out int frameRate) || frameRate <= 0))
         {
             validationMessage = "目标帧率必须是大于 0 的整数。";
+            return false;
+        }
+
+        if (options.VolumePercent < 0 || options.VolumePercent > 300)
+        {
+            validationMessage = "音量百分比必须在 0 到 300 之间。";
             return false;
         }
 
@@ -1473,6 +1640,17 @@ public sealed partial class MainWindow : Window
         root[propertyName] = value;
     }
 
+    private static void SetOrRemoveJsonBool(JsonObject root, string propertyName, bool value)
+    {
+        if (!value)
+        {
+            root.Remove(propertyName);
+            return;
+        }
+
+        root[propertyName] = value;
+    }
+
     private void ShowInfoBar(string message, InfoBarSeverity severity)
     {
         StatusInfoBar.Message = message;
@@ -1487,25 +1665,121 @@ public sealed partial class MainWindow : Window
         ShowInfoBar($"{actionName}失败：{exception.Message}", InfoBarSeverity.Error);
     }
 
-    private void CancelCurrentJobAndRemove(ProcessingJob job)
+    private async Task StartSingleJobAsync(ProcessingJob job)
     {
-        App.WriteDiagnosticLog("队列操作", $"用户取消当前任务：{job.InputPath}");
-        _cancellationTargetJob = job;
-        _activeBatchJobs.Remove(job);
-        QueueItems.Remove(job);
-        CurrentStatusText.Text = "当前状态：正在取消";
-        CurrentPptxText.Text = $"当前 PPTX：{job.FileName}";
-        CurrentDetailText.Text = "当前视频(正在取消)";
-        CurrentFileProgressBar.IsIndeterminate = true;
-        _currentFilePercent = null;
-        RefreshBatchProgress();
-        UpdateCommandStates();
-        ShowInfoBar($"已取消并移除 {job.FileName}。", InfoBarSeverity.Informational);
-        TerminateCurrentWorker();
+        if (_isProcessing)
+        {
+            if (!_activeBatchJobs.Contains(job))
+            {
+                _activeBatchJobs.Add(job);
+            }
+
+            ShowInfoBar($"{job.FileName} 已在当前批次中等待处理。", InfoBarSeverity.Informational);
+            RefreshBatchProgress();
+            UpdateCommandStates();
+            return;
+        }
+
+        await StartQueueProcessingAsync([job]);
     }
 
-    private void RemoveJobFromQueue(ProcessingJob job, string infoMessage, InfoBarSeverity severity)
+    private async Task ContinuePausedJobAsync(ProcessingJob job)
     {
+        PrepareJobForRetry(job, "等待继续处理。");
+
+        if (_isProcessing)
+        {
+            ShowInfoBar($"{job.FileName} 已加入当前批次，继续时会从头重新处理。", InfoBarSeverity.Informational);
+            RefreshBatchProgress();
+            UpdateCommandStates();
+            return;
+        }
+
+        await StartQueueProcessingAsync([job]);
+    }
+
+    private async Task RetryJobAsync(ProcessingJob job)
+    {
+        PrepareJobForRetry(job, "等待重试。");
+
+        if (_isProcessing)
+        {
+            ShowInfoBar($"{job.FileName} 已加入当前批次并会重新处理。", InfoBarSeverity.Informational);
+            RefreshBatchProgress();
+            UpdateCommandStates();
+            return;
+        }
+
+        await StartQueueProcessingAsync([job]);
+    }
+
+    private void PrepareJobForRetry(ProcessingJob job, string detail)
+    {
+        if (_isProcessing && !_activeBatchJobs.Contains(job))
+        {
+            _activeBatchJobs.Add(job);
+        }
+
+        job.MarkPending(detail);
+    }
+
+    private void PauseJob(ProcessingJob job)
+    {
+        if (!_isProcessing || !ReferenceEquals(job, _currentJob))
+        {
+            return;
+        }
+
+        App.WriteDiagnosticLog("队列操作", $"用户暂停当前任务：{job.InputPath}");
+        _activeBatchJobs.Remove(job);
+        job.MarkPaused("已暂停");
+        job.SetResultSummary(BuildPausedDetailSummary(job.InputPath, GetCurrentJobElapsed()));
+        MarkInterruptionRequested(job, WorkerInterruptionAction.Pause);
+        UpdateCurrentProgress("已暂停", job.FileName, "当前视频(已暂停)", null, DisabledAcceleration);
+        ShowInfoBar($"{job.FileName} 已暂停，继续时会从头重新处理。", InfoBarSeverity.Informational);
+        TerminateCurrentWorker();
+        UpdateAfterQueueMutation();
+    }
+
+    private void StopJob(ProcessingJob job)
+    {
+        App.WriteDiagnosticLog("队列操作", $"用户停止任务：{job.InputPath}");
+
+        if (_isProcessing && ReferenceEquals(job, _currentJob))
+        {
+            _activeBatchJobs.Remove(job);
+            job.MarkStopped("已停止");
+            job.SetResultSummary(BuildStoppedDetailSummary(job.InputPath, GetCurrentJobElapsed()));
+            MarkInterruptionRequested(job, WorkerInterruptionAction.Stop);
+            UpdateCurrentProgress("已停止", job.FileName, "当前视频(已停止)", null, DisabledAcceleration);
+            ShowInfoBar($"{job.FileName} 已停止。", InfoBarSeverity.Informational);
+            TerminateCurrentWorker();
+            UpdateAfterQueueMutation();
+            return;
+        }
+
+        _activeBatchJobs.Remove(job);
+        job.MarkStopped("已停止");
+        job.SetResultSummary(BuildStoppedDetailSummary(job.InputPath, TimeSpan.Zero));
+        UpdateAfterQueueMutation();
+        ShowInfoBar($"{job.FileName} 已停止。", InfoBarSeverity.Informational);
+    }
+
+    private void DeleteJob(ProcessingJob job)
+    {
+        if (_isProcessing && ReferenceEquals(job, _currentJob))
+        {
+            App.WriteDiagnosticLog("队列操作", $"用户删除当前任务：{job.InputPath}");
+            _activeBatchJobs.Remove(job);
+            QueueItems.Remove(job);
+            MarkInterruptionRequested(job, WorkerInterruptionAction.Remove);
+            UpdateCurrentProgress("正在移除", job.FileName, "当前视频(正在移除)", null, _activeAccelerationLabel);
+            ShowInfoBar($"已移除 {job.FileName}。", InfoBarSeverity.Informational);
+            TerminateCurrentWorker();
+            UpdateAfterQueueMutation();
+            return;
+        }
+
         bool removed = QueueItems.Remove(job);
         _activeBatchJobs.Remove(job);
 
@@ -1515,11 +1789,17 @@ public sealed partial class MainWindow : Window
         }
 
         App.WriteDiagnosticLog("队列操作", $"已移除任务：{job.InputPath}");
-        HandleQueueMutationAfterRemoval();
-        ShowInfoBar(infoMessage, severity);
+        UpdateAfterQueueMutation();
+        ShowInfoBar($"已移除 {job.FileName}。", InfoBarSeverity.Informational);
     }
 
-    private void HandleQueueMutationAfterRemoval()
+    private void MarkInterruptionRequested(ProcessingJob job, WorkerInterruptionAction action)
+    {
+        _workerInterruptionTargetJob = job;
+        _workerInterruptionAction = action;
+    }
+
+    private void UpdateAfterQueueMutation()
     {
         if (_isProcessing)
         {
@@ -1641,7 +1921,7 @@ public sealed partial class MainWindow : Window
 
     private static bool IsReadyToStart(ProcessingJob job)
     {
-        return job.Status is PendingStatus or FailedStatus;
+        return job.Status == PendingStatus;
     }
 
     private bool TryValidateProcessingEnvironment(out string? blockingMessage, out string? advisoryMessage)
@@ -1681,7 +1961,7 @@ public sealed partial class MainWindow : Window
 
         if (!File.Exists(_configPath))
         {
-            advisoryMessage = "未找到 config.json，程序会自动创建默认配置（hardwareAcceleration=auto）；如果未设置 encoder、frameRate 或 resolution，本次不会生成新的输出文件。";
+            advisoryMessage = "未找到 config.json，程序会自动创建默认配置（hardwareAcceleration=auto）；如果未设置编码、分辨率、帧率、音量或静音参数，本次不会生成新的输出文件。";
             return true;
         }
 
@@ -1697,6 +1977,7 @@ public sealed partial class MainWindow : Window
 
             JsonElement root = document.RootElement;
             bool hasVideoChanges = false;
+            bool hasAudioChanges = false;
             string? encoderName = null;
 
             if (root.TryGetProperty("encoder", out JsonElement encoder))
@@ -1751,6 +2032,34 @@ public sealed partial class MainWindow : Window
                 hasVideoChanges = true;
             }
 
+            if (root.TryGetProperty("volumePercent", out JsonElement volumePercent))
+            {
+                if (volumePercent.ValueKind != JsonValueKind.Number || !volumePercent.TryGetInt32(out int volumePercentValue))
+                {
+                    blockingMessage = "config.json 中的 volumePercent 必须是整数。";
+                    return false;
+                }
+
+                if (volumePercentValue is < 0 or > 300)
+                {
+                    blockingMessage = "config.json 中的 volumePercent 必须在 0 到 300 之间。";
+                    return false;
+                }
+
+                hasAudioChanges = volumePercentValue != 100;
+            }
+
+            if (root.TryGetProperty("mute", out JsonElement mute))
+            {
+                if (mute.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+                {
+                    blockingMessage = "config.json 中的 mute 必须是布尔值。";
+                    return false;
+                }
+
+                hasAudioChanges |= mute.GetBoolean();
+            }
+
             if (root.TryGetProperty("hardwareAcceleration", out JsonElement hardwareAcceleration))
             {
                 if (hardwareAcceleration.ValueKind != JsonValueKind.String)
@@ -1797,11 +2106,11 @@ public sealed partial class MainWindow : Window
                 }
             }
 
-            _configHasVideoChanges = hasVideoChanges;
+            _configHasVideoChanges = hasVideoChanges || hasAudioChanges;
 
-            if (!hasVideoChanges)
+            if (!_configHasVideoChanges)
             {
-                advisoryMessage = "当前 config.json 没有设置 encoder、frameRate 或 resolution；仅设置 hardwareAcceleration 或 preset 不会触发转码，本次不会生成新的输出文件。";
+                advisoryMessage = "当前 config.json 没有设置 encoder、frameRate、resolution、volumePercent 或 mute；仅设置 hardwareAcceleration 或 preset 不会触发处理，本次不会生成新的输出文件。";
             }
 
             return true;
@@ -1829,7 +2138,7 @@ public sealed partial class MainWindow : Window
         CurrentFileProgressBar.Value = completedCount == 0 ? 0 : 100;
         BatchProgressBar.Value = jobsToRun.Count == 0 ? 0 : 100;
         BatchProgressText.Text = $"{completedCount} / {jobsToRun.Count} 已完成";
-        CurrentPptxText.Text = "当前 PPTX：批次已结束";
+        CurrentPptxText.Text = "当前文件：批次已结束";
         CurrentDetailText.Text = "当前视频(已结束)";
 
         string infoBarMessage;
@@ -1850,7 +2159,7 @@ public sealed partial class MainWindow : Window
         else
         {
             CurrentStatusText.Text = "当前状态：空闲";
-            infoBarMessage = $"全部待处理任务已完成：成功 {succeededCount} 个，未生成输出 {skippedCount} 个。";
+            infoBarMessage = $"全部未开始任务已完成：成功 {succeededCount} 个，未生成输出 {skippedCount} 个。";
             severity = InfoBarSeverity.Success;
         }
 
@@ -1867,12 +2176,12 @@ public sealed partial class MainWindow : Window
     {
         if (!_configHasVideoChanges)
         {
-            return "当前未配置任何视频处理参数，因此未生成新的输出文件。";
+            return "当前未配置任何处理参数，因此未生成新的输出文件。";
         }
 
         if (totalMedia == 0 || (noVideoCount > 0 && noVideoCount == totalMedia))
         {
-            return "PPTX 中未发现可处理视频，因此未生成新的输出文件。";
+            return "文件中未发现可处理视频，因此未生成新的输出文件。";
         }
 
         if (alreadySatisfiedCount > 0 && skippedCount == alreadySatisfiedCount && failedCount == 0)
@@ -1977,6 +2286,22 @@ public sealed partial class MainWindow : Window
             $"原因：{reason}");
     }
 
+    private static string BuildPausedDetailSummary(string inputPath, TimeSpan duration)
+    {
+        return string.Join(Environment.NewLine,
+            $"源文件：{inputPath}",
+            $"已处理时间：{FormatDuration(duration)}",
+            "说明：任务已暂停，继续时会从头重新处理。");
+    }
+
+    private static string BuildStoppedDetailSummary(string inputPath, TimeSpan duration)
+    {
+        return string.Join(Environment.NewLine,
+            $"源文件：{inputPath}",
+            $"已处理时间：{FormatDuration(duration)}",
+            "说明：任务已停止，可重试或删除。");
+    }
+
     private static string FormatDuration(TimeSpan duration)
     {
         if (duration < TimeSpan.FromSeconds(1))
@@ -2018,6 +2343,19 @@ public sealed partial class MainWindow : Window
             .Select(fileName => Path.Combine(directory, fileName))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static bool IsSupportedQueueInputPath(string path)
+    {
+        string extension = Path.GetExtension(path);
+
+        if (string.Equals(extension, ".pptx", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return SupportedVideoExtensions.Any(videoExtension =>
+            string.Equals(videoExtension, extension, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string DescribeOpenFileDialogError(int errorCode)

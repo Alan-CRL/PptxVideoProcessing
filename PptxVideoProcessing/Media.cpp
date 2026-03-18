@@ -28,6 +28,7 @@ namespace
     struct ProbeInfo
     {
         bool has_video{};
+        bool has_audio{};
         std::wstring codec_name;
         std::optional<double> duration_seconds;
         std::optional<double> frame_rate;
@@ -873,6 +874,7 @@ namespace
             pptxvp::helper::RunProcess(ffmpeg_path, {L"-hide_banner", L"-i", media_path.wstring()});
 
         static const std::regex video_regex(R"(Video:\s*([A-Za-z0-9_]+))");
+        static const std::regex audio_regex(R"(Audio:\s*([A-Za-z0-9_]+))");
         static const std::regex duration_regex(R"(Duration:\s*([0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?))");
         static const std::regex dimension_regex(R"((\d{2,5})x(\d{2,5}))");
         static const std::regex fps_regex(R"(([0-9]+(?:\.[0-9]+)?)\s*fps)");
@@ -902,6 +904,7 @@ namespace
         {
             return ProbeInfo{
                 .has_video = true,
+                .has_audio = std::regex_search(result.output, audio_regex),
                 .codec_name = pptxvp::helper::Utf8ToWide(match[1].str()),
                 .duration_seconds = duration_seconds,
                 .frame_rate = frame_rate,
@@ -913,7 +916,7 @@ namespace
         return ProbeInfo{};
     }
 
-    [[nodiscard]] bool MatchesTargetConditions(const pptxvp::AppConfig& config, const ProbeInfo& probe)
+    [[nodiscard]] bool MatchesTargetVideoConditions(const pptxvp::AppConfig& config, const ProbeInfo& probe)
     {
         if (!probe.has_video)
         {
@@ -950,14 +953,14 @@ namespace
         return true;
     }
 
-    [[nodiscard]] std::optional<std::wstring> ResolveEffectiveEncoder(const pptxvp::AppConfig& config, const ProbeInfo& probe)
+    [[nodiscard]] std::optional<std::wstring> ResolveVideoEncoder(const pptxvp::AppConfig& config, const ProbeInfo& probe)
     {
         if (config.encoder.has_value())
         {
             return config.encoder;
         }
 
-        if (!config.frame_rate.has_value() && !config.resolution_height.has_value())
+        if (!config.HasMediaChanges())
         {
             return std::nullopt;
         }
@@ -965,7 +968,7 @@ namespace
         return EncoderForCodecFamily(CodecFamilyFromDecoder(probe.codec_name));
     }
 
-    [[nodiscard]] std::wstring BuildFilterChain(const pptxvp::AppConfig& config)
+    [[nodiscard]] std::wstring BuildVideoFilterChain(const pptxvp::AppConfig& config)
     {
         std::vector<std::wstring> filters;
 
@@ -992,6 +995,19 @@ namespace
         }
 
         return chain;
+    }
+
+    [[nodiscard]] std::wstring BuildAudioVolumeExpression(const pptxvp::AppConfig& config)
+    {
+        if (config.mute)
+        {
+            return L"0";
+        }
+
+        const int volume_percent = config.volume_percent.value_or(100);
+        std::wostringstream stream;
+        stream << std::fixed << std::setprecision(2) << static_cast<double>(volume_percent) / 100.0;
+        return stream.str();
     }
 
     [[nodiscard]] std::filesystem::path MakeConvertedTargetPath(const std::filesystem::path& media_path)
@@ -1036,7 +1052,7 @@ namespace
     [[nodiscard]] std::vector<std::wstring> BuildTranscodeArguments(
         const std::filesystem::path& input_path,
         const std::filesystem::path& output_path,
-        std::wstring_view encoder,
+        const std::optional<std::wstring>& video_encoder,
         const pptxvp::AppConfig& config)
     {
         std::vector<std::wstring> arguments = {
@@ -1051,17 +1067,26 @@ namespace
             L"0:v:0",
             L"-map",
             L"0:a:0?",
-            L"-c:v",
-            std::wstring(encoder),
         };
 
-        if (config.preset.has_value())
+        if (video_encoder.has_value())
+        {
+            arguments.push_back(L"-c:v");
+            arguments.push_back(*video_encoder);
+        }
+        else
+        {
+            arguments.push_back(L"-c:v");
+            arguments.push_back(L"copy");
+        }
+
+        if (video_encoder.has_value() && config.preset.has_value())
         {
             arguments.push_back(L"-preset");
             arguments.push_back(*config.preset);
         }
 
-        const std::wstring filter_chain = BuildFilterChain(config);
+        const std::wstring filter_chain = BuildVideoFilterChain(config);
 
         if (!filter_chain.empty())
         {
@@ -1069,8 +1094,21 @@ namespace
             arguments.push_back(filter_chain);
         }
 
-        arguments.push_back(L"-c:a");
-        arguments.push_back(L"copy");
+        if (config.HasAudioChanges())
+        {
+            arguments.push_back(L"-c:a");
+            arguments.push_back(L"aac");
+            arguments.push_back(L"-b:a");
+            arguments.push_back(L"192k");
+            arguments.push_back(L"-af");
+            arguments.push_back(L"volume=" + BuildAudioVolumeExpression(config));
+        }
+        else
+        {
+            arguments.push_back(L"-c:a");
+            arguments.push_back(L"copy");
+        }
+
         arguments.push_back(L"-sn");
         arguments.push_back(L"-dn");
 
@@ -1088,13 +1126,13 @@ namespace
         const std::filesystem::path& ffmpeg_path,
         const std::filesystem::path& input_path,
         const std::filesystem::path& final_output_path,
-        std::wstring_view encoder,
+        const std::optional<std::wstring>& video_encoder,
         const pptxvp::AppConfig& config,
         const LiveProgressCallback& progress_callback)
     {
         const std::filesystem::path temporary_output_path = MakeTemporaryOutputPath(final_output_path);
         const std::vector<std::wstring> arguments =
-            BuildTranscodeArguments(input_path, temporary_output_path, encoder, config);
+            BuildTranscodeArguments(input_path, temporary_output_path, video_encoder, config);
         FfmpegProgressParser parser;
 
         const pptxvp::helper::ProcessResult result = pptxvp::helper::RunProcessStreaming(
@@ -1195,7 +1233,36 @@ namespace pptxvp
                 continue;
             }
 
-            if (MatchesTargetConditions(config, probe))
+            pptxvp::AppConfig effective_config = config;
+
+            if (!probe.has_audio)
+            {
+                effective_config.volume_percent.reset();
+                effective_config.mute = false;
+            }
+
+            if (config.HasAudioChanges() && !probe.has_audio && !config.HasVideoChanges())
+            {
+                action.status = MediaActionStatus::Skipped;
+                action.message = L"视频不包含音频流，无法应用音量设置。";
+                ReportMediaProgress(
+                    progress_callback,
+                    index + 1,
+                    candidates.size(),
+                    media_path,
+                    L"已跳过",
+                    probe.duration_seconds,
+                    probe.duration_seconds,
+                    L"",
+                    summary.acceleration_backend,
+                    std::chrono::steady_clock::now() - processing_started_at);
+                ++summary.skipped_count;
+                ++summary.already_satisfied_count;
+                summary.items.push_back(std::move(action));
+                continue;
+            }
+
+            if (MatchesTargetVideoConditions(config, probe) && !effective_config.HasAudioChanges())
             {
                 action.status = MediaActionStatus::Skipped;
                 action.message = L"视频已满足目标条件，保持原样。";
@@ -1216,14 +1283,14 @@ namespace pptxvp
                 continue;
             }
 
-            const std::optional<std::wstring> encoder = ResolveEffectiveEncoder(config, probe);
+            const std::optional<std::wstring> encoder = ResolveVideoEncoder(effective_config, probe);
 
             if (!encoder.has_value())
             {
                 action.status = MediaActionStatus::Skipped;
-                action.message = config.HasVideoChanges()
+                action.message = effective_config.HasMediaChanges()
                                      ? L"无法将原始视频编码映射到可用编码器，已跳过。"
-                                     : L"当前未配置任何视频处理参数，因此保持原样。";
+                                     : L"当前未配置任何处理参数，因此保持原样。";
                 ReportMediaProgress(
                     progress_callback,
                     index + 1,
@@ -1241,7 +1308,7 @@ namespace pptxvp
             }
 
             const std::vector<std::wstring> encoder_candidates =
-                BuildEncoderCandidates(ffmpeg_path, *encoder, config, available_encoders, encoder_operational_cache);
+                BuildEncoderCandidates(ffmpeg_path, *encoder, effective_config, available_encoders, encoder_operational_cache);
             const std::wstring preferred_acceleration_label = encoder_candidates.empty()
                 ? summary.acceleration_backend
                 : DescribeAccelerationBackend(AccelerationBackendFromEncoder(encoder_candidates.front()));
@@ -1258,7 +1325,8 @@ namespace pptxvp
                     DescribeAccelerationBackend(AccelerationBackendFromEncoder(candidate_encoder));
                 const CodecFamily encoder_family = CodecFamilyFromEncoder(candidate_encoder);
                 std::filesystem::path preferred_output_path = media_path;
-                bool should_retry_with_mp4 = false;
+                bool should_retry_with_mp4 =
+                    effective_config.HasAudioChanges() && LowerExtension(media_path) != L".mp4";
 
                 if (encoder_family != CodecFamily::Unknown)
                 {
@@ -1289,7 +1357,7 @@ namespace pptxvp
                     media_path,
                     preferred_output_path,
                     candidate_encoder,
-                    config,
+                    effective_config,
                     [&](const LiveProgressState& state)
                     {
                         ReportMediaProgress(
@@ -1313,7 +1381,7 @@ namespace pptxvp
                         media_path,
                         preferred_output_path,
                         candidate_encoder,
-                        config,
+                        effective_config,
                         [&](const LiveProgressState& state)
                         {
                             ReportMediaProgress(
@@ -1372,7 +1440,7 @@ namespace pptxvp
             action.output_path = attempt.final_path;
             action.message = attempt.final_path == media_path
                                  ? L"视频内容已在原位置更新。"
-                                 : L"视频容器已改为 MP4，并同步更新了 PPTX 引用。";
+                                 : L"视频容器已改为 MP4。";
 
             if (!fallback_note.empty())
             {

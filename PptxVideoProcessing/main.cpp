@@ -3,6 +3,7 @@ PptxVideoProcessing 使用说明
 
 一、程序用途
 1. 本程序用于处理 .pptx 演示文稿中的内嵌视频。
+2. 本程序也支持直接处理常见视频文件。
 2. 程序会解包 PPTX，查找 ppt/media 目录下的常见视频文件，并调用 ffmpeg.exe 进行转码或调整。
 3. 处理完成后，程序会重新打包为新的 .pptx 文件，原文件不会被直接覆盖。
 
@@ -20,7 +21,9 @@ PptxVideoProcessing 使用说明
   "hardwareAcceleration": "auto",
   "preset": "p4",
   "frameRate": 30,
-  "resolution": "720p"
+  "resolution": "720p",
+  "volumePercent": 100,
+  "mute": false
 }
 
 四、config.json 配置项说明
@@ -63,6 +66,16 @@ PptxVideoProcessing 使用说明
    - 当前支持：360p、480p、720p、1080p、2160p。
    - 程序会按目标高度缩放，并保持原视频宽高比。
    - 缺省表示不修改分辨率。
+
+6. volumePercent
+   - 可选。
+   - 用于在原始音量基础上按 0% 到 300% 调整。
+   - 100 表示保持原样，0 表示输出静音。
+
+7. mute
+   - 可选。
+   - 布尔值，true 表示静音。
+   - 若同时设置 mute=true 与 volumePercent，则以静音为准。
 
 五、补充说明
 1. 仅支持 .pptx，不支持旧版二进制 .ppt。
@@ -147,11 +160,11 @@ namespace
 	{
 		pptxvp::helper::WriteLine(L"用法：");
 		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe");
-		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe --input <pptx路径> [--no-pause]");
-		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe --input <pptx路径> --json-progress --no-pause");
+		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe --input <文件路径> [--no-pause]");
+		pptxvp::helper::WriteLine(L"  PptxVideoProcessing.Worker.exe --input <文件路径> --json-progress --no-pause");
 		pptxvp::helper::WriteLine(L"");
 		pptxvp::helper::WriteLine(L"参数说明：");
-		pptxvp::helper::WriteLine(L"  --input <路径>        处理指定的 PPTX 文件");
+		pptxvp::helper::WriteLine(L"  --input <路径>        处理指定的 PPTX 或视频文件");
 		pptxvp::helper::WriteLine(L"  --json-progress       以 JSON Lines 输出进度事件");
 		pptxvp::helper::WriteLine(L"  --no-pause            结束时不等待按键");
 		pptxvp::helper::WriteLine(L"  --help                显示帮助");
@@ -169,7 +182,7 @@ namespace
 			{
 				if (index + 1 >= argc)
 				{
-					throw MakeArgumentError(L"--input 需要提供一个 PPTX 文件路径。");
+					throw MakeArgumentError(L"--input 需要提供一个文件路径。");
 				}
 
 				options.input_path = std::filesystem::path(argv[++index]);

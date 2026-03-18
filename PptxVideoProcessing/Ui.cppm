@@ -4,5 +4,5 @@ import std.compat;
 
 export namespace pptxvp
 {
-    [[nodiscard]] std::filesystem::path PickPowerPointFile();
+    [[nodiscard]] std::filesystem::path PickInputFile();
 }
