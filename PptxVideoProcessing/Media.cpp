@@ -944,7 +944,7 @@ namespace
 
         if (config.resolution_height.has_value())
         {
-            if (!probe.height.has_value() || *probe.height != *config.resolution_height)
+            if (!probe.height.has_value() || *probe.height > *config.resolution_height)
             {
                 return false;
             }
@@ -979,7 +979,9 @@ namespace
 
         if (config.resolution_height.has_value())
         {
-            filters.push_back(L"scale=-2:" + std::to_wstring(*config.resolution_height));
+            const std::wstring max_height = std::to_wstring(*config.resolution_height);
+            filters.push_back(
+                L"scale='if(gt(ih," + max_height + L"),trunc(iw*" + max_height + L"/ih/2)*2,iw)':'if(gt(ih," + max_height + L")," + max_height + L",ih)'");
         }
 
         std::wstring chain;

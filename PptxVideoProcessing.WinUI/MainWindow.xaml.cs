@@ -17,6 +17,7 @@ namespace PptxVideoProcessing.WinUI;
 
 public sealed partial class MainWindow : Window
 {
+    private const string WebsiteUrl = "https://www.inkeys.top/pptx-video-processing";
     private const string PendingStatus = "未开始";
     private const string ProcessingStatus = "处理中";
     private const string PausedStatus = "已暂停";
@@ -171,6 +172,22 @@ public sealed partial class MainWindow : Window
         catch (Exception exception)
         {
             HandleUiActionError("选择文件", exception);
+        }
+    }
+
+    private void WebsiteLinkButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = WebsiteUrl,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception exception)
+        {
+            HandleUiActionError("打开软件官网", exception);
         }
     }
 
@@ -1287,12 +1304,20 @@ public sealed partial class MainWindow : Window
     }
     private void UpdateCommandStates()
     {
+        UpdateQueuePresentation();
         SelectButton.IsEnabled = true;
         OptionsButton.IsEnabled = !_isProcessing;
         StartButton.IsEnabled = !_isProcessing && QueueItems.Any(IsReadyToStart);
         RetryFailedButton.IsEnabled = QueueItems.Any(job => job.Status == FailedStatus);
         ClearFinishedButton.IsEnabled = QueueItems.Any(job => job.Status == SuccessStatus);
         ClearAllButton.IsEnabled = QueueItems.Count > 0;
+    }
+
+    private void UpdateQueuePresentation()
+    {
+        bool hasItems = QueueItems.Count > 0;
+        QueueListView.Visibility = hasItems ? Visibility.Visible : Visibility.Collapsed;
+        EmptyQueueOverlay.Visibility = hasItems ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private async Task ShowProcessingOptionsDialogAsync()
@@ -1326,11 +1351,11 @@ public sealed partial class MainWindow : Window
         ComboBox resolutionComboBox = CreateOptionsComboBox(
         [
             ("保持原分辨率", string.Empty),
-            ("360p", "360p"),
-            ("480p", "480p"),
-            ("720p", "720p"),
-            ("1080p", "1080p"),
-            ("2160p", "2160p"),
+            ("<= 360p", "360p"),
+            ("<= 480p", "480p"),
+            ("<= 720p", "720p"),
+            ("<= 1080p", "1080p"),
+            ("<= 2160p", "2160p"),
         ], options.Resolution);
         NumberBox volumeNumberBox = new()
         {
@@ -1375,7 +1400,7 @@ public sealed partial class MainWindow : Window
         panel.Children.Add(CreateOptionsEditorField("硬件加速", "缺省时按 auto 自动识别，并优先尝试本机真正可用的 NVIDIA / Intel / AMD / 系统原生编码。", accelerationComboBox));
         panel.Children.Add(CreateOptionsEditorField("编码预设", "用于平衡速度与压缩效率。留空时使用编码器默认值；常见如 medium、fast、p4、p5。", presetTextBox));
         panel.Children.Add(CreateOptionsEditorField("目标帧率", "只填正整数，例如 24、30、60。留空表示不修改帧率。", frameRateTextBox));
-        panel.Children.Add(CreateOptionsEditorField("目标分辨率", "按目标高度缩放并保持宽高比。留空表示保持原分辨率。", resolutionComboBox));
+        panel.Children.Add(CreateOptionsEditorField("目标分辨率", "将该选项作为高度上限，仅当原视频高度大于该值时才会缩小，并保持原始宽高比。留空表示保持原分辨率。", resolutionComboBox));
         panel.Children.Add(CreateOptionsEditorField("音量百分比", "在原始音量基础上按 0% 到 300% 调整；100% 表示保持不变。", volumeNumberBox));
         panel.Children.Add(CreateOptionsEditorField("静音", "勾选后会按 0% 输出音量，并覆盖上方音量百分比。", muteCheckBox));
         panel.Children.Add(validationTextBlock);

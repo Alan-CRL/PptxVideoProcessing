@@ -6,7 +6,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:local="using:PptxVideoProcessing.WinUI"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    Title="PPT / 视频处理"
+    Title="PptxVideoProcessing"
     mc:Ignorable="d">
 
     <Window.SystemBackdrop>
@@ -25,22 +25,36 @@
             Grid.Row="1"
             Margin="24,16,24,0"
             Spacing="6">
-            <TextBlock
-                Style="{ThemeResource TitleLargeTextBlockStyle}"
-                Text="PPT / 视频处理" />
+            <Grid
+                ColumnDefinitions="Auto,Auto"
+                ColumnSpacing="10">
+                <TextBlock
+                    Style="{ThemeResource TitleLargeTextBlockStyle}"
+                    Text="PptxVideoProcessing" />
+                <TextBlock
+                    Grid.Column="1"
+                    FontSize="20"
+                    Opacity="0.62"
+                    VerticalAlignment="Bottom"
+                    Text="PPT / 视频处理" />
+            </Grid>
             <TextBlock
                 Opacity="0.74"
                 Text="选择一个或多个 PPTX 或常见视频文件后，按顺序处理视频内容，并在原文件旁生成新的输出文件。" />
         </StackPanel>
 
         <Border
+            x:Name="QueueDropSurfaceBorder"
             Grid.Row="2"
             Margin="24,20,24,0"
+            AllowDrop="True"
             Padding="20"
             Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
             BorderThickness="1"
-            CornerRadius="16">
+            CornerRadius="16"
+            DragOver="QueueListView_DragOver"
+            Drop="QueueListView_Drop">
             <ScrollViewer
                 HorizontalScrollBarVisibility="Disabled"
                 VerticalScrollBarVisibility="Auto"
@@ -88,148 +102,177 @@
                             Text="0 / 0 已完成" />
                     </StackPanel>
 
-                    <ListView
-                        x:Name="QueueListView"
+                    <Grid
                         Grid.Row="2"
                         Margin="0,22,0,0"
-                        AllowDrop="True"
-                        DragOver="QueueListView_DragOver"
-                        Drop="QueueListView_Drop"
-                        ItemsSource="{x:Bind QueueItems, Mode=OneWay}"
-                        MinHeight="320"
-                        ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                        ScrollViewer.VerticalScrollBarVisibility="Auto"
-                        ScrollViewer.VerticalScrollMode="Enabled"
-                        SelectionMode="None">
-                        <ListView.ItemContainerStyle>
-                            <Style TargetType="ListViewItem">
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                            </Style>
-                        </ListView.ItemContainerStyle>
+                        MinHeight="320">
+                        <ListView
+                            x:Name="QueueListView"
+                            ItemsSource="{x:Bind QueueItems, Mode=OneWay}"
+                            ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                            ScrollViewer.VerticalScrollBarVisibility="Auto"
+                            ScrollViewer.VerticalScrollMode="Enabled"
+                            SelectionMode="None">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
 
-                        <ListView.Header>
-                            <Grid
-                                ColumnDefinitions="3*,110,160,132"
-                                Padding="0,0,0,10">
-                                <TextBlock
-                                    FontWeight="SemiBold"
-                                    HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
-                                    Text="文件"
-                                    TextAlignment="Center" />
-                                <TextBlock
-                                    Grid.Column="1"
-                                    FontWeight="SemiBold"
-                                    HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
-                                    Text="状态"
-                                    TextAlignment="Center" />
-                                <TextBlock
-                                    Grid.Column="2"
-                                    FontWeight="SemiBold"
-                                    HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
-                                    Text="进度"
-                                    TextAlignment="Center" />
-                                <TextBlock
-                                    Grid.Column="3"
-                                    FontWeight="SemiBold"
-                                    HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
-                                    Text="操作"
-                                    TextAlignment="Center" />
-                            </Grid>
-                        </ListView.Header>
-
-                        <ListView.ItemTemplate>
-                            <DataTemplate x:DataType="local:ProcessingJob">
+                            <ListView.Header>
                                 <Grid
-                                    HorizontalAlignment="Stretch"
-                                    RowDefinitions="Auto,Auto">
-                                    <Grid
-                                        ColumnDefinitions="3*,110,160,132"
-                                        HorizontalAlignment="Stretch"
-                                        Padding="0,10">
-
-                                        <StackPanel
-                                            Grid.Column="0"
-                                            HorizontalAlignment="Stretch"
-                                            VerticalAlignment="Center"
-                                            Spacing="4">
-                                            <TextBlock
-                                                FontWeight="SemiBold"
-                                                HorizontalAlignment="Stretch"
-                                                Text="{x:Bind FileName}"
-                                                TextAlignment="Left"
-                                                TextTrimming="CharacterEllipsis" />
-                                            <TextBlock
-                                                HorizontalAlignment="Stretch"
-                                                Opacity="0.74"
-                                                Style="{ThemeResource CaptionTextBlockStyle}"
-                                                Text="{x:Bind InputPath}"
-                                                TextAlignment="Left"
-                                                TextTrimming="CharacterEllipsis" />
-                                        </StackPanel>
-
-                                        <TextBlock
-                                            Grid.Column="1"
-                                            HorizontalAlignment="Center"
-                                            VerticalAlignment="Center"
-                                            Text="{x:Bind Status, Mode=OneWay}"
-                                            TextAlignment="Center" />
-
-                                        <TextBlock
-                                            Grid.Column="2"
-                                            HorizontalAlignment="Center"
-                                            VerticalAlignment="Center"
-                                            Text="{x:Bind Detail, Mode=OneWay}"
-                                            TextAlignment="Center"
-                                            TextWrapping="WrapWholeWords" />
-
-                                        <StackPanel
-                                            Grid.Column="3"
-                                            HorizontalAlignment="Center"
-                                            VerticalAlignment="Center"
-                                            Spacing="8">
-                                           <Button
-                                                Click="PrimaryJobActionButton_Click"
-                                                Content="{x:Bind PrimaryActionText, Mode=OneWay}"
-                                                MinWidth="84"
-                                                Tag="{x:Bind}"
-                                                Visibility="{x:Bind PrimaryActionVisibility, Mode=OneWay}" />
-                                            <Button
-                                                Click="SecondaryJobActionButton_Click"
-                                                Content="{x:Bind SecondaryActionText, Mode=OneWay}"
-                                                MinWidth="84"
-                                                Tag="{x:Bind}"
-                                                Visibility="{x:Bind SecondaryActionVisibility, Mode=OneWay}" />
-                                            <Button
-                                                Click="ToggleDetailsButton_Click"
-                                                Content="{x:Bind DetailsActionText, Mode=OneWay}"
-                                                MinWidth="84"
-                                                Tag="{x:Bind}"
-                                                Visibility="{x:Bind DetailsButtonVisibility, Mode=OneWay}" />
-                                        </StackPanel>
-                                    </Grid>
-
-                                    <Border
-                                        Grid.Row="1"
-                                        Margin="0,0,0,8"
-                                        Padding="14,12"
-                                        Background="{ThemeResource SubtleFillColorSecondaryBrush}"
-                                        CornerRadius="12"
-                                        Visibility="{x:Bind ExpandedDetailsVisibility, Mode=OneWay}">
-                                        <TextBlock
-                                            HorizontalAlignment="Stretch"
-                                            Style="{ThemeResource CaptionTextBlockStyle}"
-                                            Text="{x:Bind DetailSummary, Mode=OneWay}"
-                                            TextAlignment="Left"
-                                            TextWrapping="WrapWholeWords" />
-                                    </Border>
+                                    ColumnDefinitions="3*,110,160,132"
+                                    Padding="0,0,0,10">
+                                    <TextBlock
+                                        FontWeight="SemiBold"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Text="文件"
+                                        TextAlignment="Center" />
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        FontWeight="SemiBold"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Text="状态"
+                                        TextAlignment="Center" />
+                                    <TextBlock
+                                        Grid.Column="2"
+                                        FontWeight="SemiBold"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Text="进度"
+                                        TextAlignment="Center" />
+                                    <TextBlock
+                                        Grid.Column="3"
+                                        FontWeight="SemiBold"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Text="操作"
+                                        TextAlignment="Center" />
                                 </Grid>
-                            </DataTemplate>
-                        </ListView.ItemTemplate>
-                    </ListView>
+                            </ListView.Header>
+
+                            <ListView.ItemTemplate>
+                                <DataTemplate x:DataType="local:ProcessingJob">
+                                    <Grid
+                                        HorizontalAlignment="Stretch"
+                                        RowDefinitions="Auto,Auto">
+                                        <Grid
+                                            ColumnDefinitions="3*,110,160,132"
+                                            HorizontalAlignment="Stretch"
+                                            Padding="0,10">
+
+                                            <StackPanel
+                                                Grid.Column="0"
+                                                HorizontalAlignment="Stretch"
+                                                VerticalAlignment="Center"
+                                                Spacing="4">
+                                                <TextBlock
+                                                    FontWeight="SemiBold"
+                                                    HorizontalAlignment="Stretch"
+                                                    Text="{x:Bind FileName}"
+                                                    TextAlignment="Left"
+                                                    TextTrimming="CharacterEllipsis" />
+                                                <TextBlock
+                                                    HorizontalAlignment="Stretch"
+                                                    Opacity="0.74"
+                                                    Style="{ThemeResource CaptionTextBlockStyle}"
+                                                    Text="{x:Bind InputPath}"
+                                                    TextAlignment="Left"
+                                                    TextTrimming="CharacterEllipsis" />
+                                            </StackPanel>
+
+                                            <TextBlock
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="{x:Bind Status, Mode=OneWay}"
+                                                TextAlignment="Center" />
+
+                                            <TextBlock
+                                                Grid.Column="2"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Text="{x:Bind Detail, Mode=OneWay}"
+                                                TextAlignment="Center"
+                                                TextWrapping="WrapWholeWords" />
+
+                                            <StackPanel
+                                                Grid.Column="3"
+                                                HorizontalAlignment="Center"
+                                                VerticalAlignment="Center"
+                                                Spacing="8">
+                                               <Button
+                                                    Click="PrimaryJobActionButton_Click"
+                                                    Content="{x:Bind PrimaryActionText, Mode=OneWay}"
+                                                    MinWidth="84"
+                                                    Tag="{x:Bind}"
+                                                    Visibility="{x:Bind PrimaryActionVisibility, Mode=OneWay}" />
+                                                <Button
+                                                    Click="SecondaryJobActionButton_Click"
+                                                    Content="{x:Bind SecondaryActionText, Mode=OneWay}"
+                                                    MinWidth="84"
+                                                    Tag="{x:Bind}"
+                                                    Visibility="{x:Bind SecondaryActionVisibility, Mode=OneWay}" />
+                                                <Button
+                                                    Click="ToggleDetailsButton_Click"
+                                                    Content="{x:Bind DetailsActionText, Mode=OneWay}"
+                                                    MinWidth="84"
+                                                    Tag="{x:Bind}"
+                                                    Visibility="{x:Bind DetailsButtonVisibility, Mode=OneWay}" />
+                                            </StackPanel>
+                                        </Grid>
+
+                                        <Border
+                                            Grid.Row="1"
+                                            Margin="0,0,0,8"
+                                            Padding="14,12"
+                                            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                            CornerRadius="12"
+                                            Visibility="{x:Bind ExpandedDetailsVisibility, Mode=OneWay}">
+                                            <TextBlock
+                                                HorizontalAlignment="Stretch"
+                                                Style="{ThemeResource CaptionTextBlockStyle}"
+                                                Text="{x:Bind DetailSummary, Mode=OneWay}"
+                                                TextAlignment="Left"
+                                                TextWrapping="WrapWholeWords" />
+                                        </Border>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListView.ItemTemplate>
+                        </ListView>
+
+                        <Border
+                            x:Name="EmptyQueueOverlay"
+                            Padding="28"
+                            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            CornerRadius="14">
+                            <StackPanel
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Spacing="12">
+                                <TextBlock
+                                    HorizontalAlignment="Center"
+                                    FontSize="20"
+                                    FontWeight="SemiBold"
+                                    Text="将文件拖到这里" />
+                                <TextBlock
+                                    HorizontalAlignment="Center"
+                                    Opacity="0.78"
+                                    Text="支持一次加入多个 PPTX 或常见视频文件"
+                                    TextAlignment="Center"
+                                    TextWrapping="WrapWholeWords" />
+                                <Button
+                                    Click="SelectPptxButton_Click"
+                                    Content="添加文件"
+                                    HorizontalAlignment="Center"
+                                    MinWidth="120" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
                 </Grid>
             </ScrollViewer>
         </Border>
@@ -242,7 +285,7 @@
                 x:Name="SelectButton"
                 Click="SelectPptxButton_Click"
                 Icon="OpenFile"
-                Label="选择文件" />
+                Label="添加文件" />
             <AppBarButton
                 x:Name="OptionsButton"
                 Click="ConfigureOptionsButton_Click"
@@ -286,12 +329,21 @@
                     Opacity="0.72"
                     Text="本项目基于 GNU 通用公共许可证第 3 版获得许可" />
             </StackPanel>
-            <TextBlock
+            <StackPanel
                 Grid.Column="1"
                 HorizontalAlignment="Right"
-                Opacity="0.72"
-                VerticalAlignment="Bottom"
-                Text="版本 1.0" />
+                Spacing="2"
+                VerticalAlignment="Bottom">
+                <HyperlinkButton
+                    Click="WebsiteLinkButton_Click"
+                    Content="www.inkeys.top/pptx-video-processing"
+                    HorizontalAlignment="Right"
+                    Padding="0" />
+                <TextBlock
+                    HorizontalAlignment="Right"
+                    Opacity="0.72"
+                    Text="版本 1.0" />
+            </StackPanel>
         </Grid>
     </Grid>
 </Window>
