@@ -16,10 +16,8 @@ import PptxVideoProcessing.Ui;
 
 namespace
 {
-    constexpr int SupportedFfmpegMajorVersion = 7;
-    constexpr int SupportedFfmpegMaxMinorVersion = 1;
-    constexpr int SupportedFfmpegLibavcodecMajor = 61;
-    constexpr std::wstring_view SupportedFfmpegReleaseRange = L"FFmpeg 7.0.x / 7.1.x 稳定发行版";
+    constexpr int MinimumSupportedFfmpegMajorVersion = 7;
+    constexpr std::wstring_view MinimumSupportedFfmpegVersion = L"FFmpeg 7.0 及以上版本";
 
     struct FfmpegBuildInfo
     {
@@ -27,7 +25,6 @@ namespace
         std::optional<int> major_version;
         std::optional<int> minor_version;
         bool is_git_build{};
-        std::optional<int> libavcodec_major;
     };
 
     [[nodiscard]] std::runtime_error MakeAppError(std::wstring_view message)
@@ -64,7 +61,6 @@ namespace
         std::istringstream stream(result.output);
         std::string line;
         static const std::regex version_regex(R"(^ffmpeg version\s+(?:n)?(\d+)\.(\d+)(?:\.(\d+))?)", std::regex::icase);
-        static const std::regex libavcodec_regex(R"(libavcodec\s+(\d+)\.\s*\d+\.\s*\d+)", std::regex::icase);
         std::smatch match;
 
         while (std::getline(stream, line))
@@ -89,65 +85,39 @@ namespace
                 }
             }
 
-            if (!info.libavcodec_major.has_value() &&
-                std::regex_search(trimmed_line, match, libavcodec_regex))
-            {
-                info.libavcodec_major = std::stoi(match[1].str());
-            }
         }
 
         return info.version_line.empty() ? std::nullopt : std::optional<FfmpegBuildInfo>(std::move(info));
     }
 
-    void ValidateFfmpegBuild(const std::filesystem::path& ffmpeg_path)
+    [[nodiscard]] std::optional<std::wstring> ValidateFfmpegBuild(const std::filesystem::path& ffmpeg_path)
     {
         const std::optional<FfmpegBuildInfo> build_info = QueryFfmpegBuildInfo(ffmpeg_path);
 
         if (!build_info.has_value())
         {
-            throw MakeAppError(
-                L"无法识别 ffmpeg 版本信息。当前软件仅支持 " + std::wstring(SupportedFfmpegReleaseRange) +
-                L"（libavcodec " + std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
-        }
-
-        if (build_info->is_git_build)
-        {
-            throw MakeAppError(
-                L"检测到不受支持的 ffmpeg git/nightly build： " + build_info->version_line +
-                L"。为避免 NVENC 驱动门槛被新 nightly 抬高，当前软件已锁定到 " +
-                std::wstring(SupportedFfmpegReleaseRange) + L"（libavcodec " +
-                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+            throw MakeAppError(L"无法识别 ffmpeg 版本信息。当前软件需要 " + std::wstring(MinimumSupportedFfmpegVersion) + L"。");
         }
 
         if (!build_info->major_version.has_value() || !build_info->minor_version.has_value())
         {
-            throw MakeAppError(
-                L"无法解析 ffmpeg 版本号： " + build_info->version_line + L"。当前软件仅支持 " +
-                std::wstring(SupportedFfmpegReleaseRange) + L"（libavcodec " +
-                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+            throw MakeAppError(L"无法解析 ffmpeg 版本号： " + build_info->version_line + L"。当前软件需要 " +
+                               std::wstring(MinimumSupportedFfmpegVersion) + L"。");
         }
 
-        if (*build_info->major_version != SupportedFfmpegMajorVersion ||
-            *build_info->minor_version > SupportedFfmpegMaxMinorVersion)
+        if (*build_info->major_version < MinimumSupportedFfmpegMajorVersion)
         {
-            throw MakeAppError(
-                L"当前 ffmpeg 版本不在支持范围内： " + build_info->version_line + L"。当前软件仅支持 " +
-                std::wstring(SupportedFfmpegReleaseRange) + L"（libavcodec " +
-                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x）。");
+            throw MakeAppError(L"当前 ffmpeg 版本过低： " + build_info->version_line + L"。当前软件需要 " +
+                               std::wstring(MinimumSupportedFfmpegVersion) + L"。");
         }
 
-        if (build_info->libavcodec_major != SupportedFfmpegLibavcodecMajor)
+        if (build_info->is_git_build)
         {
-            const std::wstring detected_libavcodec =
-                build_info->libavcodec_major.has_value()
-                ? std::to_wstring(*build_info->libavcodec_major)
-                : std::wstring(L"未知");
-            throw MakeAppError(
-                L"当前 ffmpeg 的 libavcodec 版本不在支持范围内： " + build_info->version_line +
-                L"。检测到 libavcodec " + detected_libavcodec +
-                L"，当前软件仅支持 libavcodec " +
-                std::to_wstring(SupportedFfmpegLibavcodecMajor) + L".x。");
+            return L"检测到 ffmpeg git/nightly build： " + build_info->version_line +
+                   L"。当前版本仍允许继续使用，但 nightly 版本可能抬高 NVENC / AMF / QSV 的驱动门槛，建议优先使用稳定发行版。";
         }
+
+        return std::nullopt;
     }
 
     [[nodiscard]] std::wstring StatusPrefix(pptxvp::MediaActionStatus status)
@@ -379,7 +349,11 @@ namespace pptxvp
                 L"未在程序同目录找到 ffmpeg.exe，期望路径为： " + request.ffmpeg_path.wstring());
         }
 
-        ValidateFfmpegBuild(request.ffmpeg_path);
+        if (const std::optional<std::wstring> ffmpeg_warning = ValidateFfmpegBuild(request.ffmpeg_path);
+            ffmpeg_warning.has_value() && !progress_callback)
+        {
+            helper::WriteLine(L"[警告] " + *ffmpeg_warning);
+        }
 
         EmitStage(progress_callback, ProcessStage::LoadingConfig, L"正在读取 config.json...");
         const AppConfig config = LoadConfig(request.config_path);

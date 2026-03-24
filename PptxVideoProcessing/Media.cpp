@@ -31,6 +31,7 @@ namespace
         bool has_audio{};
         std::wstring codec_name;
         std::optional<double> duration_seconds;
+        std::optional<int> bitrate_kbps;
         std::optional<double> frame_rate;
         std::optional<int> width;
         std::optional<int> height;
@@ -95,6 +96,102 @@ namespace
         {
             return std::nullopt;
         }
+    }
+
+    [[nodiscard]] std::optional<int> ParseBitrateKbps(std::string_view text)
+    {
+        static const std::regex bitrate_regex(R"(([0-9]+(?:\.[0-9]+)?)\s*([kKmM])b/s)");
+        std::smatch match;
+        const std::string line(text);
+
+        if (!std::regex_search(line, match, bitrate_regex))
+        {
+            return std::nullopt;
+        }
+
+        try
+        {
+            double value = std::stod(match[1].str());
+            const char unit = static_cast<char>(std::tolower(static_cast<unsigned char>(match[2].str().front())));
+
+            if (unit == 'm')
+            {
+                value *= 1000.0;
+            }
+
+            if (value <= 0.0)
+            {
+                return std::nullopt;
+            }
+
+            return static_cast<int>(std::lround(value));
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    [[nodiscard]] std::optional<int> EstimateBitrateKbps(
+        const std::filesystem::path& media_path,
+        const std::optional<double>& duration_seconds)
+    {
+        if (!duration_seconds.has_value() || *duration_seconds <= 0.0)
+        {
+            return std::nullopt;
+        }
+
+        std::error_code error_code;
+        const std::uintmax_t file_size = std::filesystem::file_size(media_path, error_code);
+
+        if (error_code || file_size == static_cast<std::uintmax_t>(-1))
+        {
+            return std::nullopt;
+        }
+
+        const double bitrate_kbps = (static_cast<double>(file_size) * 8.0) / *duration_seconds / 1000.0;
+
+        if (bitrate_kbps <= 0.0)
+        {
+            return std::nullopt;
+        }
+
+        return static_cast<int>(std::lround(bitrate_kbps));
+    }
+
+    [[nodiscard]] std::optional<int> ProbeBitrateKbps(
+        std::string_view ffmpeg_output,
+        const std::filesystem::path& media_path,
+        const std::optional<double>& duration_seconds)
+    {
+        std::optional<int> container_bitrate_kbps;
+        std::istringstream stream{std::string(ffmpeg_output)};
+        std::string line;
+
+        while (std::getline(stream, line))
+        {
+            const std::string_view trimmed_line = TrimAsciiWhitespace(line);
+
+            if (trimmed_line.find("Video:") != std::string_view::npos)
+            {
+                if (const std::optional<int> bitrate_kbps = ParseBitrateKbps(trimmed_line))
+                {
+                    return bitrate_kbps;
+                }
+            }
+
+            if (trimmed_line.find("bitrate:") != std::string_view::npos)
+            {
+                container_bitrate_kbps = ParseBitrateKbps(trimmed_line);
+            }
+        }
+
+        if (container_bitrate_kbps.has_value())
+        {
+            return container_bitrate_kbps;
+        }
+
+        return EstimateBitrateKbps(media_path, duration_seconds);
     }
 
     [[nodiscard]] std::wstring FormatHmsFromSeconds(double seconds_value)
@@ -907,6 +1004,7 @@ namespace
                 .has_audio = std::regex_search(result.output, audio_regex),
                 .codec_name = pptxvp::helper::Utf8ToWide(match[1].str()),
                 .duration_seconds = duration_seconds,
+                .bitrate_kbps = ProbeBitrateKbps(result.output, media_path, duration_seconds),
                 .frame_rate = frame_rate,
                 .width = width,
                 .height = height,
@@ -1012,6 +1110,290 @@ namespace
         return stream.str();
     }
 
+    [[nodiscard]] bool IsAsciiDigits(std::wstring_view text)
+    {
+        return !text.empty() &&
+               std::ranges::all_of(text, [](wchar_t character)
+               {
+                   return character >= L'0' && character <= L'9';
+               });
+    }
+
+    [[nodiscard]] std::optional<std::wstring> TryMapAmfQualityValue(std::wstring_view value)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(value);
+
+        if (lowered.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (lowered == L"speed" ||
+            lowered == L"fast" ||
+            lowered == L"faster" ||
+            lowered == L"veryfast" ||
+            lowered == L"low")
+        {
+            return L"speed";
+        }
+
+        if (lowered == L"balanced" || lowered == L"medium")
+        {
+            return L"balanced";
+        }
+
+        if (lowered == L"quality" ||
+            lowered == L"slow" ||
+            lowered == L"slower" ||
+            lowered == L"veryslow" ||
+            lowered == L"high")
+        {
+            return L"quality";
+        }
+
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<std::wstring> TryMapMediaFoundationQualityValue(std::wstring_view value)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(value);
+
+        if (lowered.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (IsAsciiDigits(lowered))
+        {
+            const int quality = std::stoi(lowered);
+
+            if (quality >= 0 && quality <= 100)
+            {
+                return lowered;
+            }
+        }
+
+        if (lowered == L"speed" ||
+            lowered == L"fast" ||
+            lowered == L"faster" ||
+            lowered == L"veryfast" ||
+            lowered == L"low")
+        {
+            return L"35";
+        }
+
+        if (lowered == L"balanced" || lowered == L"medium")
+        {
+            return L"60";
+        }
+
+        if (lowered == L"quality" ||
+            lowered == L"slow" ||
+            lowered == L"slower" ||
+            lowered == L"veryslow" ||
+            lowered == L"high")
+        {
+            return L"85";
+        }
+
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<std::wstring> TryMapSvtPresetValue(std::wstring_view value)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(value);
+
+        if (lowered.empty())
+        {
+            return std::nullopt;
+        }
+
+        if (IsAsciiDigits(lowered))
+        {
+            return lowered;
+        }
+
+        if (lowered == L"speed" ||
+            lowered == L"fast" ||
+            lowered == L"faster" ||
+            lowered == L"veryfast" ||
+            lowered == L"low")
+        {
+            return L"10";
+        }
+
+        if (lowered == L"balanced" || lowered == L"medium")
+        {
+            return L"8";
+        }
+
+        if (lowered == L"quality" ||
+            lowered == L"slow" ||
+            lowered == L"slower" ||
+            lowered == L"veryslow" ||
+            lowered == L"high")
+        {
+            return L"6";
+        }
+
+        return std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<int> ResolveTargetVideoBitrateKbps(const ProbeInfo& probe)
+    {
+        if (!probe.bitrate_kbps.has_value())
+        {
+            return std::nullopt;
+        }
+
+        return std::max(256, *probe.bitrate_kbps);
+    }
+
+    struct EncoderPresetOption
+    {
+        std::wstring option_name;
+        std::wstring value;
+    };
+
+    [[nodiscard]] std::optional<EncoderPresetOption> ResolveEncoderPresetOption(
+        std::wstring_view encoder,
+        const pptxvp::AppConfig& config)
+    {
+        const std::wstring normalized_encoder = pptxvp::helper::ToLowerAscii(encoder);
+
+        if (normalized_encoder.empty())
+        {
+            return std::nullopt;
+        }
+
+        auto make_level_option = [&](pptxvp::PresetLevel level) -> std::optional<EncoderPresetOption>
+        {
+            if (normalized_encoder.contains(L"_amf"))
+            {
+                switch (level)
+                {
+                case pptxvp::PresetLevel::Low:
+                    return EncoderPresetOption{L"-quality", L"speed"};
+                case pptxvp::PresetLevel::Medium:
+                    return EncoderPresetOption{L"-quality", L"balanced"};
+                case pptxvp::PresetLevel::High:
+                    return EncoderPresetOption{L"-quality", L"quality"};
+                }
+            }
+
+            if (normalized_encoder.contains(L"_mf"))
+            {
+                switch (level)
+                {
+                case pptxvp::PresetLevel::Low:
+                    return EncoderPresetOption{L"-quality", L"35"};
+                case pptxvp::PresetLevel::Medium:
+                    return EncoderPresetOption{L"-quality", L"60"};
+                case pptxvp::PresetLevel::High:
+                    return EncoderPresetOption{L"-quality", L"85"};
+                }
+            }
+
+            if (normalized_encoder.contains(L"svtav1"))
+            {
+                switch (level)
+                {
+                case pptxvp::PresetLevel::Low:
+                    return EncoderPresetOption{L"-preset", L"10"};
+                case pptxvp::PresetLevel::Medium:
+                    return EncoderPresetOption{L"-preset", L"8"};
+                case pptxvp::PresetLevel::High:
+                    return EncoderPresetOption{L"-preset", L"6"};
+                }
+            }
+
+            if (normalized_encoder.contains(L"_nvenc"))
+            {
+                switch (level)
+                {
+                case pptxvp::PresetLevel::Low:
+                    return EncoderPresetOption{L"-preset", L"p3"};
+                case pptxvp::PresetLevel::Medium:
+                    return EncoderPresetOption{L"-preset", L"p4"};
+                case pptxvp::PresetLevel::High:
+                    return EncoderPresetOption{L"-preset", L"p5"};
+                }
+            }
+
+            if (normalized_encoder.contains(L"_qsv") ||
+                normalized_encoder.contains(L"x264") ||
+                normalized_encoder.contains(L"x265") ||
+                normalized_encoder.contains(L"rav1e"))
+            {
+                switch (level)
+                {
+                case pptxvp::PresetLevel::Low:
+                    return EncoderPresetOption{L"-preset", L"fast"};
+                case pptxvp::PresetLevel::Medium:
+                    return EncoderPresetOption{L"-preset", L"medium"};
+                case pptxvp::PresetLevel::High:
+                    return EncoderPresetOption{L"-preset", L"slow"};
+                }
+            }
+
+            return std::nullopt;
+        };
+
+        if (config.preset.has_value())
+        {
+            const std::wstring normalized_preset = pptxvp::helper::ToLowerAscii(*config.preset);
+
+            if (normalized_preset.empty())
+            {
+                return std::nullopt;
+            }
+
+            if (normalized_encoder.contains(L"_amf"))
+            {
+                if (const std::optional<std::wstring> quality = TryMapAmfQualityValue(normalized_preset))
+                {
+                    return EncoderPresetOption{L"-quality", *quality};
+                }
+
+                return std::nullopt;
+            }
+
+            if (normalized_encoder.contains(L"_mf"))
+            {
+                if (const std::optional<std::wstring> quality = TryMapMediaFoundationQualityValue(normalized_preset))
+                {
+                    return EncoderPresetOption{L"-quality", *quality};
+                }
+
+                return std::nullopt;
+            }
+
+            if (normalized_encoder.contains(L"svtav1"))
+            {
+                if (const std::optional<std::wstring> svt_preset = TryMapSvtPresetValue(normalized_preset))
+                {
+                    return EncoderPresetOption{L"-preset", *svt_preset};
+                }
+
+                return std::nullopt;
+            }
+
+            if (normalized_encoder == L"mpeg4")
+            {
+                return std::nullopt;
+            }
+
+            return EncoderPresetOption{L"-preset", normalized_preset};
+        }
+
+        if (!config.preset_level.has_value())
+        {
+            return std::nullopt;
+        }
+
+        return make_level_option(*config.preset_level);
+    }
+
     [[nodiscard]] std::filesystem::path MakeConvertedTargetPath(const std::filesystem::path& media_path)
     {
         const std::filesystem::path desired =
@@ -1055,6 +1437,7 @@ namespace
         const std::filesystem::path& input_path,
         const std::filesystem::path& output_path,
         const std::optional<std::wstring>& video_encoder,
+        const ProbeInfo& probe,
         const pptxvp::AppConfig& config)
     {
         std::vector<std::wstring> arguments = {
@@ -1075,6 +1458,12 @@ namespace
         {
             arguments.push_back(L"-c:v");
             arguments.push_back(*video_encoder);
+
+            if (const std::optional<int> target_bitrate_kbps = ResolveTargetVideoBitrateKbps(probe))
+            {
+                arguments.push_back(L"-b:v");
+                arguments.push_back(std::to_wstring(*target_bitrate_kbps) + L"k");
+            }
         }
         else
         {
@@ -1082,10 +1471,14 @@ namespace
             arguments.push_back(L"copy");
         }
 
-        if (video_encoder.has_value() && config.preset.has_value())
+        if (video_encoder.has_value())
         {
-            arguments.push_back(L"-preset");
-            arguments.push_back(*config.preset);
+            if (const std::optional<EncoderPresetOption> preset_option =
+                    ResolveEncoderPresetOption(*video_encoder, config))
+            {
+                arguments.push_back(preset_option->option_name);
+                arguments.push_back(preset_option->value);
+            }
         }
 
         const std::wstring filter_chain = BuildVideoFilterChain(config);
@@ -1129,12 +1522,13 @@ namespace
         const std::filesystem::path& input_path,
         const std::filesystem::path& final_output_path,
         const std::optional<std::wstring>& video_encoder,
+        const ProbeInfo& probe,
         const pptxvp::AppConfig& config,
         const LiveProgressCallback& progress_callback)
     {
         const std::filesystem::path temporary_output_path = MakeTemporaryOutputPath(final_output_path);
         const std::vector<std::wstring> arguments =
-            BuildTranscodeArguments(input_path, temporary_output_path, video_encoder, config);
+            BuildTranscodeArguments(input_path, temporary_output_path, video_encoder, probe, config);
         FfmpegProgressParser parser;
 
         const pptxvp::helper::ProcessResult result = pptxvp::helper::RunProcessStreaming(
@@ -1359,6 +1753,7 @@ namespace pptxvp
                     media_path,
                     preferred_output_path,
                     candidate_encoder,
+                    probe,
                     effective_config,
                     [&](const LiveProgressState& state)
                     {
@@ -1383,6 +1778,7 @@ namespace pptxvp
                         media_path,
                         preferred_output_path,
                         candidate_encoder,
+                        probe,
                         effective_config,
                         [&](const LiveProgressState& state)
                         {

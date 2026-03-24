@@ -342,7 +342,7 @@
                 <TextBlock
                     HorizontalAlignment="Right"
                     Opacity="0.72"
-                    Text="版本 1.0" />
+                    Text="版本 1.1" />
             </StackPanel>
         </Grid>
     </Grid>

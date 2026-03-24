@@ -9,7 +9,7 @@ PptxVideoProcessing 使用说明
 
 二、使用步骤
 1. 将本程序生成的 exe 与 ffmpeg.exe 放在同一目录。
-   - ffmpeg 建议使用稳定发行版 7.0.x 或 7.1.x；不要使用 git/nightly build。
+   - ffmpeg 需要 7.0 及以上版本；建议优先使用稳定发行版。
 2. 可选：在 exe 同目录放置 config.json；如果不存在，程序首次启动时会自动创建一个默认包含 {"hardwareAcceleration":"auto"} 的配置。
 3. 运行程序，按提示选择一个 .pptx 文件。
 4. 程序会自动处理内嵌视频，并在原文件所在目录生成“原文件名_已处理.pptx”。
@@ -19,7 +19,7 @@ PptxVideoProcessing 使用说明
 {
   "encoder": "h264",
   "hardwareAcceleration": "auto",
-  "preset": "p4",
+  "presetLevel": "medium",
   "frameRate": 30,
   "resolution": "720p",
   "volumePercent": 100,
@@ -58,22 +58,29 @@ PptxVideoProcessing 使用说明
 
 4. preset
    - 可选。
-   - 透传给 ffmpeg 的 -preset，用于在速度与画质之间取舍。
+   - 用于手动填写具体编码预设值。
    - 例如软件编码常见值可用 veryfast、fast、medium；NVENC 常见值可用 p1 到 p7。
+   - 若同时设置 preset 与 presetLevel，则以 preset 为准。
 
-5. resolution
+5. presetLevel
+   - 可选。
+   - 当前支持：low、medium、high。
+   - 用于给普通用户快速选择常见预设档位。
+   - 程序会按实际编码器自动映射，例如软件编码常用 fast / medium / slow，NVENC 常用 p3 / p4 / p5。
+
+6. resolution
    - 可选。
    - 当前支持：360p、480p、720p、1080p、2160p。
    - 该项表示输出视频的高度上限，仅当原视频高度大于该值时才会缩小。
    - 缩放时会保持原视频宽高比。
    - 缺省表示不修改分辨率。
 
-6. volumePercent
+7. volumePercent
    - 可选。
    - 用于在原始音量基础上按 0% 到 300% 调整。
    - 100 表示保持原样，0 表示输出静音。
 
-7. mute
+8. mute
    - 可选。
    - 布尔值，true 表示静音。
    - 若同时设置 mute=true 与 volumePercent，则以静音为准。
@@ -85,7 +92,7 @@ PptxVideoProcessing 使用说明
 4. 程序会扫描 ppt/media 中的常见视频文件，例如 mp4、m4v、mov、avi、wmv、mkv、webm。
 5. 若原视频容器与目标编码不兼容，程序会转成 MP4，并自动更新 PPTX 内的媒体引用。
 6. 程序默认保留首个视频流和可选音频流，音频通常按复制方式保留，不主动改变演示稿中的媒体位置与时长设置。
-7. 为避免新 nightly build 抬高 NVENC / AMF / QSV 的驱动门槛，当前版本仅支持 FFmpeg 7.0.x / 7.1.x 稳定发行版（libavcodec 61.x）。
+7. 若检测到 ffmpeg git/nightly build，程序会给出警告，但不会禁止继续处理；建议优先使用稳定发行版，以减少 NVENC / AMF / QSV 驱动门槛波动带来的风险。
 */
 #include <nlohmann/json.hpp>
 

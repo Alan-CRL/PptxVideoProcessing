@@ -156,6 +156,33 @@ namespace
 
         return lowered;
     }
+
+    [[nodiscard]] pptxvp::PresetLevel ParsePresetLevel(std::wstring_view value)
+    {
+        const std::wstring lowered = pptxvp::helper::ToLowerAscii(value);
+
+        if (lowered.empty())
+        {
+            throw MakeConfigError(L"config.json 中的 presetLevel 不能为空字符串。");
+        }
+
+        if (lowered == L"low")
+        {
+            return pptxvp::PresetLevel::Low;
+        }
+
+        if (lowered == L"medium")
+        {
+            return pptxvp::PresetLevel::Medium;
+        }
+
+        if (lowered == L"high")
+        {
+            return pptxvp::PresetLevel::High;
+        }
+
+        throw MakeConfigError(L"config.json 中的 presetLevel 只能是 low、medium 或 high。");
+    }
 }
 
 namespace pptxvp
@@ -248,6 +275,17 @@ namespace pptxvp
             }
 
             config.preset = NormalizePreset(helper::Utf8ToWide(document["preset"].get<std::string>()));
+        }
+
+        if (document.contains("presetLevel"))
+        {
+            if (!document["presetLevel"].is_string())
+            {
+                throw MakeConfigError(L"config.json 中的 presetLevel 必须是字符串。");
+            }
+
+            config.preset_level =
+                ParsePresetLevel(helper::Utf8ToWide(document["presetLevel"].get<std::string>()));
         }
 
         if (document.contains("volumePercent"))

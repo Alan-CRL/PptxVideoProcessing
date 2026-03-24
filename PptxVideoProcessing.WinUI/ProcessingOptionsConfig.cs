@@ -8,6 +8,8 @@ internal sealed class ProcessingOptionsConfig
 
     public string Preset { get; set; } = string.Empty;
 
+    public string PresetLevel { get; set; } = string.Empty;
+
     public string FrameRate { get; set; } = string.Empty;
 
     public string Resolution { get; set; } = string.Empty;

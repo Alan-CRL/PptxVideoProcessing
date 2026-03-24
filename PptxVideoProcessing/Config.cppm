@@ -14,6 +14,13 @@ export namespace pptxvp
         MediaFoundation,
     };
 
+    enum class PresetLevel
+    {
+        Low,
+        Medium,
+        High,
+    };
+
     struct AppConfig
     {
         std::optional<std::wstring> encoder;
@@ -21,6 +28,7 @@ export namespace pptxvp
         std::optional<int> resolution_height;
         std::optional<HardwareAcceleration> hardware_acceleration;
         std::optional<std::wstring> preset;
+        std::optional<PresetLevel> preset_level;
         std::optional<int> volume_percent;
         bool mute{};
 

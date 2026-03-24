@@ -29,11 +29,9 @@ public sealed partial class MainWindow : Window
     private const string SystemNativeAcceleration = "系统原生 (Media Foundation)";
     private const string AutoAcceleration = "自动识别中";
     private const string SoftwareAcceleration = "纯软件";
-    private const string SupportedFfmpegReleaseRange = "FFmpeg 7.0.x / 7.1.x 稳定发行版";
+    private const string MinimumSupportedFfmpegVersion = "FFmpeg 7.0 及以上版本";
     private const string QueueFileFilter = "支持的文件 (*.pptx;*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts)\0*.pptx;*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts\0PPTX 演示文稿 (*.pptx)\0*.pptx\0视频文件 (*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts)\0*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm;*.flv;*.mpeg;*.mpg;*.ts;*.mts;*.m2ts\0\0";
-    private const int SupportedFfmpegMajorVersion = 7;
-    private const int SupportedFfmpegMaxMinorVersion = 1;
-    private const int SupportedFfmpegLibavcodecMajor = 61;
+    private const int MinimumSupportedFfmpegMajorVersion = 7;
     private const int OpenFileDialogBufferSize = 65536;
     private const int DefaultWindowWidth = 1240;
     private const int DefaultWindowHeight = 1000;
@@ -92,8 +90,7 @@ public sealed partial class MainWindow : Window
     private sealed record FfmpegBuildInfo(
         string VersionLine,
         Version? ProductVersion,
-        bool IsGitBuild,
-        int? LibavcodecMajor);
+        bool IsGitBuild);
 
     private enum WorkerInterruptionAction
     {
@@ -119,10 +116,15 @@ public sealed partial class MainWindow : Window
             App.WriteDiagnosticLog("主窗口", message);
             ShowInfoBar(message, InfoBarSeverity.Warning);
         }
-        else if (!TryValidateFfmpegBuild(out string? ffmpegValidationMessage))
+        else if (!TryValidateFfmpegBuild(out string? ffmpegBlockingMessage, out string? ffmpegAdvisoryMessage))
         {
-            App.WriteDiagnosticLog("主窗口", ffmpegValidationMessage ?? "ffmpeg 版本校验失败。");
-            ShowInfoBar(ffmpegValidationMessage ?? "ffmpeg 版本校验失败。", InfoBarSeverity.Warning);
+            App.WriteDiagnosticLog("主窗口", ffmpegBlockingMessage ?? "ffmpeg 版本校验失败。");
+            ShowInfoBar(ffmpegBlockingMessage ?? "ffmpeg 版本校验失败。", InfoBarSeverity.Warning);
+        }
+        else if (!string.IsNullOrWhiteSpace(ffmpegAdvisoryMessage))
+        {
+            App.WriteDiagnosticLog("主窗口", ffmpegAdvisoryMessage!);
+            ShowInfoBar(ffmpegAdvisoryMessage!, InfoBarSeverity.Warning);
         }
     }
 
@@ -1076,9 +1078,10 @@ public sealed partial class MainWindow : Window
         CurrentAccelerationText.Text = $"当前加速：{_activeAccelerationLabel}";
     }
 
-    private bool TryValidateFfmpegBuild(out string? blockingMessage)
+    private bool TryValidateFfmpegBuild(out string? blockingMessage, out string? advisoryMessage)
     {
         blockingMessage = null;
+        advisoryMessage = null;
 
         if (!TryReadFfmpegBuildInfo(_ffmpegPath, out FfmpegBuildInfo? buildInfo, out string? readErrorMessage))
         {
@@ -1086,7 +1089,7 @@ public sealed partial class MainWindow : Window
             return false;
         }
 
-        blockingMessage = ValidateFfmpegBuild(buildInfo!);
+        (blockingMessage, advisoryMessage) = ValidateFfmpegBuild(buildInfo!);
         return string.IsNullOrWhiteSpace(blockingMessage);
     }
 
@@ -1150,23 +1153,10 @@ public sealed partial class MainWindow : Window
                 productVersion = parsedVersion;
             }
 
-            Match libavcodecMatch = Regex.Match(
-                combinedOutput,
-                @"libavcodec\s+(?<major>\d+)\.\s*\d+\.\s*\d+",
-                RegexOptions.IgnoreCase);
-            int? libavcodecMajor = null;
-
-            if (libavcodecMatch.Success &&
-                int.TryParse(libavcodecMatch.Groups["major"].Value, out int parsedLibavcodecMajor))
-            {
-                libavcodecMajor = parsedLibavcodecMajor;
-            }
-
             buildInfo = new FfmpegBuildInfo(
                 VersionLine: versionLine,
                 ProductVersion: productVersion,
-                IsGitBuild: versionLine.Contains("git-", StringComparison.OrdinalIgnoreCase),
-                LibavcodecMajor: libavcodecMajor);
+                IsGitBuild: versionLine.Contains("git-", StringComparison.OrdinalIgnoreCase));
             return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
@@ -1176,30 +1166,26 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private static string? ValidateFfmpegBuild(FfmpegBuildInfo buildInfo)
+    private static (string? BlockingMessage, string? AdvisoryMessage) ValidateFfmpegBuild(FfmpegBuildInfo buildInfo)
     {
-        if (buildInfo.IsGitBuild)
-        {
-            return $"检测到不受支持的 ffmpeg git/nightly build：{buildInfo.VersionLine}。为避免 NVENC 驱动门槛被新 nightly 抬高，当前软件已锁定到 {SupportedFfmpegReleaseRange}（libavcodec {SupportedFfmpegLibavcodecMajor}.x），请替换为稳定版后重试。";
-        }
-
         if (buildInfo.ProductVersion is null)
         {
-            return $"无法解析 ffmpeg 版本号：{buildInfo.VersionLine}。当前软件仅支持 {SupportedFfmpegReleaseRange}（libavcodec {SupportedFfmpegLibavcodecMajor}.x）。";
+            return ($"无法解析 ffmpeg 版本号：{buildInfo.VersionLine}。当前软件需要 {MinimumSupportedFfmpegVersion}。", null);
         }
 
-        if (buildInfo.ProductVersion.Major != SupportedFfmpegMajorVersion ||
-            buildInfo.ProductVersion.Minor > SupportedFfmpegMaxMinorVersion)
+        if (buildInfo.ProductVersion.Major < MinimumSupportedFfmpegMajorVersion)
         {
-            return $"当前 ffmpeg 版本不在支持范围内：{buildInfo.VersionLine}。当前软件仅支持 {SupportedFfmpegReleaseRange}（libavcodec {SupportedFfmpegLibavcodecMajor}.x）。";
+            return ($"当前 ffmpeg 版本过低：{buildInfo.VersionLine}。当前软件需要 {MinimumSupportedFfmpegVersion}。", null);
         }
 
-        if (buildInfo.LibavcodecMajor != SupportedFfmpegLibavcodecMajor)
+        if (buildInfo.IsGitBuild)
         {
-            return $"当前 ffmpeg 的 libavcodec 版本不在支持范围内：{buildInfo.VersionLine}。检测到 libavcodec {buildInfo.LibavcodecMajor?.ToString() ?? "未知"}，当前软件仅支持 libavcodec {SupportedFfmpegLibavcodecMajor}.x。";
+            return (
+                null,
+                $"检测到 ffmpeg git/nightly build：{buildInfo.VersionLine}。当前版本仍允许继续使用，但 nightly 版本可能抬高 NVENC / AMF / QSV 的驱动门槛，建议优先使用稳定发行版。");
         }
 
-        return null;
+        return (null, null);
     }
 
     private static string DescribeConfiguredAcceleration(string? rawValue)
@@ -1343,6 +1329,19 @@ public sealed partial class MainWindow : Window
             Text = options.Preset,
             PlaceholderText = "留空使用编码器默认预设，例如 medium、fast、p4、p5",
         };
+        ComboBox presetLevelComboBox = CreateOptionsComboBox(
+        [
+            ("默认：保持当前安装方式", string.Empty),
+            ("低（更偏速度）", "low"),
+            ("中（平衡）", "medium"),
+            ("高（更偏压缩效率）", "high"),
+        ], options.PresetLevel);
+        StackPanel presetEditorPanel = new()
+        {
+            Spacing = 8,
+        };
+        presetEditorPanel.Children.Add(presetLevelComboBox);
+        presetEditorPanel.Children.Add(presetTextBox);
         TextBox frameRateTextBox = new()
         {
             Text = options.FrameRate,
@@ -1392,13 +1391,13 @@ public sealed partial class MainWindow : Window
         };
         panel.Children.Add(new TextBlock
         {
-            Text = "空白表示恢复为默认。保存后会写回程序目录中的 config.json。",
+            Text = "空白表示恢复为默认。保存后会写回程序目录中的 config.json；重新编码时会优先按原视频码率输出，避免只改帧率时明显发糊。",
             TextWrapping = TextWrapping.WrapWholeWords,
             Opacity = 0.78,
         });
         panel.Children.Add(CreateOptionsEditorField("视频编码器", "常用可写 h264、h265、av1、mpeg4，也支持直接写 libx264、h264_nvenc 这类 ffmpeg 编码器名。", encoderTextBox));
         panel.Children.Add(CreateOptionsEditorField("硬件加速", "缺省时按 auto 自动识别，并优先尝试本机真正可用的 NVIDIA / Intel / AMD / 系统原生编码。", accelerationComboBox));
-        panel.Children.Add(CreateOptionsEditorField("编码预设", "用于平衡速度与压缩效率。留空时使用编码器默认值；常见如 medium、fast、p4、p5。", presetTextBox));
+        panel.Children.Add(CreateOptionsEditorField("编码预设", "上方给小白快速选低 / 中 / 高，下方也可手动写 medium、fast、p4、p5 这类具体值。手动输入优先；都留空时使用编码器默认值。", presetEditorPanel));
         panel.Children.Add(CreateOptionsEditorField("目标帧率", "只填正整数，例如 24、30、60。留空表示不修改帧率。", frameRateTextBox));
         panel.Children.Add(CreateOptionsEditorField("目标分辨率", "将该选项作为高度上限，仅当原视频高度大于该值时才会缩小，并保持原始宽高比。留空表示保持原分辨率。", resolutionComboBox));
         panel.Children.Add(CreateOptionsEditorField("音量百分比", "在原始音量基础上按 0% 到 300% 调整；100% 表示保持不变。", volumeNumberBox));
@@ -1427,6 +1426,7 @@ public sealed partial class MainWindow : Window
                     encoderTextBox,
                     accelerationComboBox,
                     presetTextBox,
+                    presetLevelComboBox,
                     frameRateTextBox,
                     resolutionComboBox,
                     volumeNumberBox,
@@ -1499,6 +1499,7 @@ public sealed partial class MainWindow : Window
         options.Encoder = ReadString(root, "encoder", string.Empty);
         options.HardwareAcceleration = ReadString(root, "hardwareAcceleration", options.HardwareAcceleration);
         options.Preset = ReadString(root, "preset", string.Empty);
+        options.PresetLevel = ReadString(root, "presetLevel", string.Empty);
         options.FrameRate = root.TryGetProperty("frameRate", out JsonElement frameRate) ? frameRate.ToString() : string.Empty;
         options.Resolution = ReadString(root, "resolution", string.Empty);
         options.VolumePercent = root.TryGetProperty("volumePercent", out JsonElement volumePercent) && volumePercent.TryGetInt32(out int parsedVolumePercent)
@@ -1525,8 +1526,10 @@ public sealed partial class MainWindow : Window
         SetOrRemoveJsonString(root, "encoder", options.Encoder);
         SetOrRemoveJsonString(root, "hardwareAcceleration", options.HardwareAcceleration);
         SetOrRemoveJsonString(root, "preset", options.Preset);
+        SetOrRemoveJsonString(root, "presetLevel", options.PresetLevel);
         SetOrRemoveJsonString(root, "resolution", options.Resolution);
         SetOrRemoveJsonBool(root, "mute", options.Mute);
+        root.Remove("compressionLevel");
 
         if (string.IsNullOrWhiteSpace(options.FrameRate))
         {
@@ -1558,6 +1561,7 @@ public sealed partial class MainWindow : Window
         TextBox encoderTextBox,
         ComboBox accelerationComboBox,
         TextBox presetTextBox,
+        ComboBox presetLevelComboBox,
         TextBox frameRateTextBox,
         ComboBox resolutionComboBox,
         NumberBox volumeNumberBox,
@@ -1572,6 +1576,7 @@ public sealed partial class MainWindow : Window
             Encoder = NormalizeOptionalText(encoderTextBox.Text),
             HardwareAcceleration = GetSelectedComboBoxValue(accelerationComboBox),
             Preset = NormalizeOptionalText(presetTextBox.Text),
+            PresetLevel = GetSelectedComboBoxValue(presetLevelComboBox),
             FrameRate = NormalizeOptionalText(frameRateTextBox.Text),
             Resolution = GetSelectedComboBoxValue(resolutionComboBox),
             VolumePercent = (int)Math.Round(rawVolume),
@@ -1594,7 +1599,7 @@ public sealed partial class MainWindow : Window
         return true;
     }
 
-    private static FrameworkElement CreateOptionsEditorField(string title, string description, Control editor)
+    private static FrameworkElement CreateOptionsEditorField(string title, string description, FrameworkElement editor)
     {
         StackPanel panel = new()
         {
@@ -1968,13 +1973,15 @@ public sealed partial class MainWindow : Window
             return false;
         }
 
-        if (!TryValidateFfmpegBuild(out string? ffmpegValidationMessage))
+        if (!TryValidateFfmpegBuild(out string? ffmpegBlockingMessage, out string? ffmpegAdvisoryMessage))
         {
-            blockingMessage = ffmpegValidationMessage;
+            blockingMessage = ffmpegBlockingMessage;
             return false;
         }
 
-        return TryInspectConfig(out blockingMessage, out advisoryMessage);
+        bool configValid = TryInspectConfig(out blockingMessage, out string? configAdvisoryMessage);
+        advisoryMessage = MergeAdvisoryMessages(ffmpegAdvisoryMessage, configAdvisoryMessage);
+        return configValid;
     }
 
     private bool TryInspectConfig(out string? blockingMessage, out string? advisoryMessage)
@@ -2131,11 +2138,36 @@ public sealed partial class MainWindow : Window
                 }
             }
 
+            if (root.TryGetProperty("presetLevel", out JsonElement presetLevel))
+            {
+                if (presetLevel.ValueKind != JsonValueKind.String)
+                {
+                    blockingMessage = "config.json 中的 presetLevel 必须是字符串。";
+                    return false;
+                }
+
+                string? rawPresetLevel = presetLevel.GetString();
+
+                if (string.IsNullOrWhiteSpace(rawPresetLevel))
+                {
+                    blockingMessage = "config.json 中的 presetLevel 不能为空字符串。";
+                    return false;
+                }
+
+                string normalizedPresetLevel = rawPresetLevel.Trim().ToLowerInvariant();
+
+                if (normalizedPresetLevel is not ("low" or "medium" or "high"))
+                {
+                    blockingMessage = "config.json 中的 presetLevel 只能是 low、medium 或 high。";
+                    return false;
+                }
+            }
+
             _configHasVideoChanges = hasVideoChanges || hasAudioChanges;
 
             if (!_configHasVideoChanges)
             {
-                advisoryMessage = "当前 config.json 没有设置 encoder、frameRate、resolution、volumePercent 或 mute；仅设置 hardwareAcceleration 或 preset 不会触发处理，本次不会生成新的输出文件。";
+                advisoryMessage = "当前 config.json 没有设置 encoder、frameRate、resolution、volumePercent 或 mute；仅设置 hardwareAcceleration、preset 或 presetLevel 不会触发处理，本次不会生成新的输出文件。";
             }
 
             return true;
@@ -2150,6 +2182,25 @@ public sealed partial class MainWindow : Window
             blockingMessage = $"读取 config.json 失败。{exception.Message}";
             return false;
         }
+    }
+
+    private static string? MergeAdvisoryMessages(string? first, string? second)
+    {
+        string?[] messages =
+        [
+            first,
+            second,
+        ];
+
+        messages = messages
+            .Where(message => !string.IsNullOrWhiteSpace(message))
+            .Select(message => message!.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        return messages.Length == 0
+            ? null
+            : string.Join(Environment.NewLine, messages);
     }
 
     private void ApplyBatchCompletionState(IReadOnlyList<ProcessingJob> jobsToRun)
